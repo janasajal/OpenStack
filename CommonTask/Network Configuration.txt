@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 04 — Network Configuration
+  Network Configuration
  Topic   : Tenant Network, Subnet, Router, Floating IP, and
            External Connectivity Setup
 ================================================================================
