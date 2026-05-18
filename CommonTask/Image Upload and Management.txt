@@ -339,5 +339,5 @@ The following was confirmed upon completion:
   - Glance API and Ceph backend confirmed healthy
 
 ================================================================================
-END OF LAB — SCENARIO 05
+END O
 ================================================================================
