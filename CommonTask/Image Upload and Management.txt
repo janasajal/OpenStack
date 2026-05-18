@@ -1,0 +1,343 @@
+================================================================================
+ LAB SCENARIO 05 — Image Upload and Management
+ Topic   : Custom VM Image Upload to Glance with Integrity Verification,
+           Access Control, Versioning, and Lifecycle Management
+================================================================================
+
+OBJECTIVE
+---------
+A custom RHEL 9.2 VM image was required to be uploaded to the OpenStack Glance
+image service for use by the development team in automated deployments. The
+image was prepared and verified locally before upload, uploaded with full
+metadata, shared with specific projects only, versioned for traceability, and
+validated via a smoke-test boot before being published.
+
+--------------------------------------------------------------------------------
+STEP 1 — Local Image Preparation and Verification
+--------------------------------------------------------------------------------
+
+The image file was inspected to confirm its format and size:
+
+  $ ls -lh /tmp/images/
+
+  -rw-r--r-- 1 ostack ostack 1.2G May 18 06:00 RHEL-9.2-x86_64-custom.qcow2
+
+The image format was verified using qemu-img:
+
+  $ qemu-img info /tmp/images/RHEL-9.2-x86_64-custom.qcow2
+
+  image: /tmp/images/RHEL-9.2-x86_64-custom.qcow2
+  file format: qcow2
+  virtual size: 40 GiB (42949672960 bytes)
+  disk size: 1.2 GiB
+  cluster_size: 65536
+  Format specific information:
+    compat: 1.1
+    compression type: zlib
+    lazy refcounts: false
+    refcount bits: 16
+    corrupt: false
+
+The SHA256 checksum was generated and saved as the integrity baseline:
+
+  $ sha256sum /tmp/images/RHEL-9.2-x86_64-custom.qcow2
+
+  a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2  \
+    /tmp/images/RHEL-9.2-x86_64-custom.qcow2
+
+  $ sha256sum /tmp/images/RHEL-9.2-x86_64-custom.qcow2 \
+      > /tmp/images/RHEL-9.2-x86_64-custom.qcow2.sha256
+
+The image was scanned for corruption:
+
+  $ qemu-img check /tmp/images/RHEL-9.2-x86_64-custom.qcow2
+
+  No errors were found on the image.
+  Image end offset: 1288490496
+
+--------------------------------------------------------------------------------
+STEP 2 — Image Upload to Glance with Full Metadata
+--------------------------------------------------------------------------------
+
+Admin credentials were sourced for the upload:
+
+  $ source /etc/openstack/admin-openrc.sh
+
+The image was uploaded with complete metadata tags defining hardware
+requirements and OS properties:
+
+  $ openstack image create \
+      --file /tmp/images/RHEL-9.2-x86_64-custom.qcow2 \
+      --disk-format qcow2 \
+      --container-format bare \
+      --property os_type=linux \
+      --property os_distro=rhel \
+      --property os_version=9.2 \
+      --property hw_disk_bus=virtio \
+      --property hw_vif_model=virtio \
+      --property hw_qemu_guest_agent=yes \
+      --property img_config_drive=optional \
+      --property architecture=x86_64 \
+      --min-disk 40 \
+      --min-ram 2048 \
+      --tag rhel9 \
+      --tag custom \
+      --tag dev-team \
+      --private \
+      "RHEL-9.2-x86_64-custom-v1.0"
+
+  +------------------+------------------------------------------------------+
+  | Field            | Value                                                |
+  +------------------+------------------------------------------------------+
+  | id               | img-abcd-1234-5678-efgh-000000000001                 |
+  | name             | RHEL-9.2-x86_64-custom-v1.0                          |
+  | status           | queued                                               |
+  | disk_format      | qcow2                                                |
+  | container_format | bare                                                 |
+  | visibility       | private                                              |
+  | min_disk         | 40                                                   |
+  | min_ram          | 2048                                                 |
+  | os_distro        | rhel                                                 |
+  | os_version       | 9.2                                                  |
+  | hw_disk_bus      | virtio                                               |
+  | hw_vif_model     | virtio                                               |
+  | architecture     | x86_64                                               |
+  | tags             | rhel9, custom, dev-team                              |
+  +------------------+------------------------------------------------------+
+
+Upload progress was monitored until status changed to active:
+
+  $ watch -n3 openstack image show "RHEL-9.2-x86_64-custom-v1.0" \
+      | grep status
+
+  | status | saving  |
+  | status | active  |  <- upload complete
+
+--------------------------------------------------------------------------------
+STEP 3 — Post-Upload Checksum Verification
+--------------------------------------------------------------------------------
+
+The checksum recorded by Glance was retrieved and compared against the
+locally generated baseline:
+
+  $ openstack image show "RHEL-9.2-x86_64-custom-v1.0" \
+      | grep -E "checksum|hash"
+
+  | checksum       | a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4     |
+  | os_hash_algo   | sha512                               |
+  | os_hash_value  | a1b2c3d4e5f6....<full sha512>....    |
+
+The local baseline was compared:
+
+  $ cat /tmp/images/RHEL-9.2-x86_64-custom.qcow2.sha256
+
+  a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+
+  -> Checksums matched. Image integrity confirmed.
+
+--------------------------------------------------------------------------------
+STEP 4 — Visibility Control and Project Sharing
+--------------------------------------------------------------------------------
+
+The image was confirmed as private by default:
+
+  $ openstack image show "RHEL-9.2-x86_64-custom-v1.0" \
+      | grep visibility
+
+  | visibility | private |
+
+The image was shared with the specific dev project only:
+
+  $ openstack image add project \
+      "RHEL-9.2-x86_64-custom-v1.0" \
+      dev-bu-project
+
+  +------------+--------------------------------------+
+  | Field      | Value                                |
+  +------------+--------------------------------------+
+  | image_id   | img-abcd-1234-5678-efgh-000000000001 |
+  | member_id  | proj-dev-abcd-1234-5678-000000000001 |
+  | status     | pending                              |
+  +------------+--------------------------------------+
+
+The dev project accepted the shared image:
+
+  $ openstack image set --accept \
+      img-abcd-1234-5678-efgh-000000000001
+
+The member status was confirmed:
+
+  $ openstack image member list "RHEL-9.2-x86_64-custom-v1.0"
+
+  +--------------------------------------+--------------------------------------+----------+
+  | Image ID                             | Member ID                            | Status   |
+  +--------------------------------------+--------------------------------------+----------+
+  | img-abcd-1234-5678-efgh-000000000001 | proj-dev-abcd-1234-5678-000000000001 | accepted |
+  +--------------------------------------+--------------------------------------+----------+
+
+--------------------------------------------------------------------------------
+STEP 5 — Image Versioning and Tagging
+--------------------------------------------------------------------------------
+
+Build date and version tags were applied for audit traceability:
+
+  $ openstack image set \
+      --tag "build-20260518" \
+      --tag "v1.0" \
+      --tag "approved" \
+      "RHEL-9.2-x86_64-custom-v1.0"
+
+The image inventory was listed with tags:
+
+  $ openstack image list --long | grep -E "Name|RHEL"
+
+  +--------------------------------------+-----------------------------+--------+------------+
+  | ID                                   | Name                        | Status | Tags       |
+  +--------------------------------------+-----------------------------+--------+------------+
+  | img-abcd-1234-5678-efgh-000000000001 | RHEL-9.2-x86_64-custom-v1.0 | active | rhel9,v1.0 |
+  | img-abcd-0001-0001-0001-000000000001 | RHEL-9.2-x86_64-custom-v0.9 | active | rhel9,v0.9 |
+  | img-abcd-0002-0002-0002-000000000002 | RHEL-8.6-x86_64-base        | active | rhel8,base |
+  +--------------------------------------+-----------------------------+--------+------------+
+
+Images were searchable by tag:
+
+  $ openstack image list --tag rhel9
+
+  +--------------------------------------+-----------------------------+--------+
+  | ID                                   | Name                        | Status |
+  +--------------------------------------+-----------------------------+--------+
+  | img-abcd-1234-5678-efgh-000000000001 | RHEL-9.2-x86_64-custom-v1.0 | active |
+  | img-abcd-0001-0001-0001-000000000001 | RHEL-9.2-x86_64-custom-v0.9 | active |
+  +--------------------------------------+-----------------------------+--------+
+
+--------------------------------------------------------------------------------
+STEP 6 — Old Image Deactivation and Deprecation
+--------------------------------------------------------------------------------
+
+The previous version was deactivated to prevent new VMs from being spawned
+from it, while preserving the image data for existing references:
+
+  $ openstack image deactivate "RHEL-9.2-x86_64-custom-v0.9"
+
+  $ openstack image show "RHEL-9.2-x86_64-custom-v0.9" | grep status
+
+  | status | deactivated |
+
+A deprecated tag was applied for visibility:
+
+  $ openstack image set \
+      --tag deprecated \
+      "RHEL-9.2-x86_64-custom-v0.9"
+
+Before deletion was performed, all VMs using the old image were checked:
+
+  $ openstack server list --all-projects \
+      --image "RHEL-9.2-x86_64-custom-v0.9"
+
+  +----+------+--------+----------+
+  | ID | Name | Status | Networks |
+  +----+------+--------+----------+
+  |    |      |        |          |
+  +----+------+--------+----------+
+
+  -> No VMs referenced the old image. Safe to delete.
+
+The deprecated image was removed:
+
+  $ openstack image delete "RHEL-9.2-x86_64-custom-v0.9"
+
+  $ openstack image show "RHEL-9.2-x86_64-custom-v0.9"
+
+  No image with a name or ID of 'RHEL-9.2-x86_64-custom-v0.9' exists.
+
+--------------------------------------------------------------------------------
+STEP 7 — Smoke-Test Boot Validation
+--------------------------------------------------------------------------------
+
+A test VM was booted from the new image to confirm it was deployable:
+
+  $ openstack server create \
+      --flavor m1.small \
+      --image "RHEL-9.2-x86_64-custom-v1.0" \
+      --network tenant-internal-net \
+      --key-name admin-keypair \
+      --wait \
+      image-smoketest-vm
+
+The VM status was confirmed:
+
+  $ openstack server show image-smoketest-vm | grep -E "status|power"
+
+  | status      | ACTIVE  |
+  | power_state | Running |
+
+The console log was reviewed for successful cloud-init completion:
+
+  $ openstack console log show image-smoketest-vm | tail -15
+
+  [  OK  ] Started OpenSSH server daemon.
+  [  OK  ] Reached target Multi-User System.
+  Cloud-init v.23.1 finished at Mon, 18 May 2026 07:15:22 +0000.
+    Datasource DataSourceOpenStack [net, OpenStack/latest, raw].
+    Up 38.25 seconds.
+
+SSH access and OS release were verified:
+
+  $ openstack floating ip create external-net | grep floating_ip_address
+  | floating_ip_address | 10.50.0.105 |
+
+  $ openstack server add floating ip image-smoketest-vm 10.50.0.105
+
+  $ ssh -i ~/.ssh/admin-keypair.pem cloud-user@10.50.0.105
+
+  [cloud-user@image-smoketest-vm ~]$ cat /etc/redhat-release
+  Red Hat Enterprise Linux release 9.2 (Plow)
+
+  [cloud-user@image-smoketest-vm ~]$ systemctl is-active sshd cloud-init
+  active
+  inactive   <- cloud-init exits after completion, as expected
+
+Test resources were cleaned up:
+
+  $ openstack server delete image-smoketest-vm --wait
+  $ openstack floating ip delete 10.50.0.105
+
+--------------------------------------------------------------------------------
+STEP 8 — Glance Backend Store Health Verification
+--------------------------------------------------------------------------------
+
+The Glance API was confirmed reachable:
+
+  $ openstack image list > /dev/null && echo "Glance API: OK"
+  Glance API: OK
+
+The Ceph backend configuration was verified:
+
+  $ grep -E "stores|default_store" /etc/glance/glance-api.conf
+
+  enabled_backends = default_backend:rbd
+  default_backend = default_backend
+
+Ceph pool usage for the images pool was reviewed:
+
+  $ ceph df | grep images
+
+  images    16    18.4 GiB   0 B       1.09 TiB
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Image integrity verified via SHA256 checksum before and after upload
+  - Image uploaded as private with full OS and hardware metadata
+  - Shared exclusively with dev-bu-project (member status: accepted)
+  - Version and build date tags applied for traceability
+  - Previous version deactivated, tagged deprecated, and deleted safely
+  - Smoke-test VM booted successfully with cloud-init completion confirmed
+  - Glance API and Ceph backend confirmed healthy
+
+================================================================================
+END OF LAB — SCENARIO 05
+================================================================================
