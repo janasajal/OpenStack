@@ -1,0 +1,260 @@
+================================================================
+ NOVA (COMPUTE SERVICE)
+OpenStack Administration Lab Notes
+================================================================
+
+WHAT IS NOVA?
+-------------
+Nova is the compute engine of OpenStack. It is responsible for:
+  - Launching, managing and terminating virtual machines
+  - Scheduling VMs to the right hypervisor
+  - Managing VM lifecycle (start, stop, reboot, migrate)
+  - Communicating with Glance (images), Neutron (networking),
+    Cinder (storage) to provision complete instances
+
+NOVA COMPONENTS:
+  - nova-api       : Accepts and validates API requests
+  - nova-scheduler : Decides which hypervisor gets the VM
+  - nova-conductor : Middleman between compute and database
+  - nova-compute   : Runs on each hypervisor, creates VMs
+
+HOW VM CREATION WORKS:
+  1. User sends request to nova-api
+  2. nova-api validates request and sends to message queue
+  3. nova-scheduler picks the best hypervisor
+  4. nova-conductor coordinates with database
+  5. nova-compute on selected hypervisor creates the VM
+  6. Glance provides the image, Neutron sets up networking
+
+================================================================
+LAB COMMANDS & OUTPUT
+================================================================
+
+1. CHECK NOVA SERVICE STATUS
+-----------------------------
+Purpose: Verify all Nova components are running before operations
+
+  $ openstack compute service list
+
+  Output:
+  +--------------------------------------+----------------+------+----------+---------+-------+----------------------------+
+  | ID                                   | Binary         | Host | Zone     | Status  | State | Updated At                 |
+  +--------------------------------------+----------------+------+----------+---------+-------+----------------------------+
+  | a5db892b-a27a-4837-a1f5-200c581af9bc | nova-conductor | myvm | internal | enabled | up    | 2026-05-17T13:56:28.000000 |
+  | 41472fbe-bb7f-4734-8b8c-d000751772f4 | nova-compute   | myvm | nova     | enabled | up    | 2026-05-17T13:56:28.000000 |
+  | 29791b2c-3233-45e0-ada2-a87e881b2631 | nova-scheduler | myvm | internal | enabled | up    | 2026-05-17T13:56:32.000000 |
+  +--------------------------------------+----------------+------+----------+---------+-------+----------------------------+
+
+EXPLANATION:
+  - Status: enabled = service is administratively enabled
+  - State: up       = service is actively running and healthy
+  - Zone: internal  = management services (conductor, scheduler)
+  - Zone: nova      = compute services running on hypervisors
+  - Updated At      = last heartbeat, confirms service is alive
+
+
+2. CHECK HYPERVISORS
+--------------------
+Purpose: See available compute hosts and their capacity
+
+  $ openstack hypervisor list
+
+  Output:
+  +----+---------------------+-----------------+---------------+-------+
+  | ID | Hypervisor Hostname | Hypervisor Type | Host IP       | State |
+  +----+---------------------+-----------------+---------------+-------+
+  |  1 | myvm                | QEMU            | 172.20.128.18 | up    |
+  +----+---------------------+-----------------+---------------+-------+
+
+EXPLANATION:
+  - Hypervisor Type: QEMU = software emulation (used in nested
+    virtualisation inside Hyper-V)
+  - In production this would show KVM
+  - State: up = hypervisor is healthy and accepting VMs
+
+
+3. LIST FLAVORS
+---------------
+Purpose: See available VM sizes before launching instances
+
+  $ openstack flavor list
+
+  Output:
+  +----+-----------+-------+------+-----------+-------+-----------+
+  | ID | Name      |   RAM | Disk | Ephemeral | VCPUs | Is Public |
+  +----+-----------+-------+------+-----------+-------+-----------+
+  | 1  | m1.tiny   |   512 |    1 |         0 |     1 | True      |
+  | 2  | m1.small  |  2048 |   20 |         0 |     1 | True      |
+  | 3  | m1.medium |  4096 |   40 |         0 |     2 | True      |
+  | 4  | m1.large  |  8192 |   80 |         0 |     4 | True      |
+  | 42 | m1.nano   |   128 |    1 |         0 |     1 | True      |
+  | 5  | m1.xlarge | 16384 |  160 |         0 |     8 | True      |
+  +----+-----------+-------+------+-----------+-------+-----------+
+
+EXPLANATION:
+  - RAM        : Memory in MB
+  - Disk       : Root disk size in GB
+  - Ephemeral  : Temporary disk, deleted when VM is deleted
+  - VCPUs      : Virtual CPUs allocated to VM
+  - Is Public  : True = all projects can use this flavor
+  - m1.nano    : Smallest flavor, used for lab (128MB RAM)
+
+
+4. LIST IMAGES
+--------------
+Purpose: See available OS images to boot VMs from
+
+  $ openstack image list
+
+  Output:
+  +--------------------------------------+--------------------------+--------+
+  | ID                                   | Name                     | Status |
+  +--------------------------------------+--------------------------+--------+
+  | 09038b1d-c45b-4e09-818b-35fe8ae426eb | cirros-0.5.2-x86_64-disk | active |
+  +--------------------------------------+--------------------------+--------+
+
+EXPLANATION:
+  - cirros : Tiny Linux OS (15MB) made for testing OpenStack
+  - Status: active = image is ready to use
+  - Glance stores and serves these images to Nova
+
+
+5. LAUNCH A VIRTUAL MACHINE
+----------------------------
+Purpose: Create and start a new VM instance
+
+  $ openstack server create \
+    --flavor m1.nano \
+    --image cirros-0.5.2-x86_64-disk \
+    --network private \
+    --wait myserver
+
+  Output:
+  +-------------------------------------+-----------------------------------------------------------------+
+  | Field                               | Value                                                           |
+  +-------------------------------------+-----------------------------------------------------------------+
+  | OS-EXT-STS:power_state              | Running                                                         |
+  | OS-EXT-STS:vm_state                 | active                                                          |
+  | OS-EXT-SRV-ATTR:host                | myvm                                                            |
+  | OS-EXT-SRV-ATTR:hypervisor_hostname | myvm                                                            |
+  | OS-EXT-SRV-ATTR:instance_name       | instance-00000002                                               |
+  | OS-SRV-USG:launched_at              | 2026-05-17T14:11:09.000000                                      |
+  | addresses                           | private=10.0.0.8, fdf8:8f13:2c21:0:f816:3eff:fe04:dcc4          |
+  | flavor                              | m1.nano (42)                                                    |
+  | image                               | cirros-0.5.2-x86_64-disk (09038b1d-c45b-4e09-818b-35fe8ae426eb) |
+  | key_name                            | None                                                            |
+  | name                                | myserver                                                        |
+  | security_groups                     | name='default'                                                  |
+  | status                              | ACTIVE                                                          |
+  +-------------------------------------+-----------------------------------------------------------------+
+
+EXPLANATION:
+  - status: ACTIVE        = VM is running successfully
+  - vm_state: active      = hypervisor confirms VM is alive
+  - power_state: Running  = VM is powered on
+  - addresses             = VM got private IP 10.0.0.8
+  - hypervisor_hostname   = which host is running this VM
+  - instance_name         = internal name on the hypervisor
+  - --wait                = wait until VM reaches final state
+
+
+6. CREATE AND ASSIGN FLOATING IP
+---------------------------------
+Purpose: Give VM a public IP so it can be reached from outside
+
+  $ openstack floating ip create public
+
+  Output:
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | floating_ip_address | 172.24.4.141                         |
+  | status              | DOWN                                 |
+  | port_id             | None                                 |
+  +---------------------+--------------------------------------+
+
+  $ openstack server add floating ip myserver 172.24.4.141
+
+  $ openstack server show myserver | grep addresses
+  | addresses | private=10.0.0.8, 172.24.4.141 |
+
+EXPLANATION:
+  - Floating IP maps public IP to private IP via NAT
+  - status: DOWN = not yet assigned to any VM
+  - After assignment VM has both private and public IP
+  - Similar to Elastic IP in AWS
+
+
+7. ACCESS VM VIA VNC CONSOLE
+------------------------------
+Purpose: Get browser-based console access to VM
+
+  $ openstack console url show myserver
+
+  Output:
+  +----------+--------------------------------------------------------------------------------+
+  | Field    | Value                                                                          |
+  +----------+--------------------------------------------------------------------------------+
+  | protocol | vnc                                                                            |
+  | type     | novnc                                                                          |
+  | url      | http://172.20.128.18:6080/vnc_lite.html?path=%3Ftoken%3Df4086ea3-...           |
+  +----------+--------------------------------------------------------------------------------+
+
+EXPLANATION:
+  - Open URL in browser to get VM console access
+  - Works even without network connectivity to VM
+  - Cirros login: username=cirros, password=gocubsgo
+
+
+8. STOP, START AND DELETE VM
+-----------------------------
+Purpose: Basic VM lifecycle management
+
+  $ openstack server stop myserver
+  $ openstack server list
+  | myserver | SHUTOFF | ...  |   <- VM stopped but not deleted
+
+  $ openstack server start myserver
+  $ openstack server list
+  | myserver | ACTIVE  | ...  |   <- VM running again
+
+  $ openstack server delete myserver
+  $ openstack server list
+  (empty)                          <- VM deleted, resources freed
+
+EXPLANATION:
+  - SHUTOFF  : VM is stopped, IPs still reserved
+  - ACTIVE   : VM is running
+  - delete   : Releases all resources back to pool
+
+================================================================
+ QUESTIONS - NOVA
+================================================================
+
+Q: How does Nova decide which hypervisor to place a VM on?
+A: nova-scheduler uses filters and weights. Filters eliminate
+   hosts that don't meet requirements (RAM, disk, CPU).
+   Weights rank remaining hosts. Default is random among
+   filtered hosts. Common filters: RamFilter, DiskFilter,
+   ComputeFilter, AvailabilityZoneFilter.
+
+Q: What is the difference between stop and delete?
+A: Stop (SHUTOFF) powers off the VM but keeps it with all
+   its resources reserved. Delete permanently removes the VM
+   and releases all resources (IP, compute, root disk).
+
+Q: A VM is stuck in BUILD state. How do you debug?
+A: 1. Check nova-compute logs for errors
+   2. Check nova-scheduler to see if it found a host
+   3. Check if image is available in Glance
+   4. Check if network is available in Neutron
+   5. Check hypervisor has enough resources
+
+Q: What is a flavor?
+A: A flavor defines the compute resources for a VM -
+   vCPUs, RAM, root disk size and ephemeral disk size.
+   Similar to instance types in AWS (t2.micro, m5.large).
+
+================================================================
+       END
+================================================================
