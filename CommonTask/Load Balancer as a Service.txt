@@ -1,0 +1,523 @@
+================================================================================
+ LAB SCENARIO 09 — Load Balancer as a Service (LBaaS) with Octavia
+ Topic   : Production HA Load Balancer Configuration with Listener,
+           Pool, Health Monitor, Floating IP, and Failover Testing
+================================================================================
+
+OBJECTIVE
+---------
+A production-grade load balancer was required to be configured using OpenStack
+Octavia to distribute HTTPS traffic across two backend application VMs with
+high availability. The configuration was built layer by layer: load balancer
+object, listener, pool with session persistence, health monitor, backend
+members, and floating IP association. Failover and amphora HA were validated
+at the end.
+
+--------------------------------------------------------------------------------
+TARGET TOPOLOGY
+--------------------------------------------------------------------------------
+
+  External Traffic
+        |
+        v
+  [Floating IP: 10.50.0.150]
+        |
+  [Octavia Load Balancer]
+  [VIP: 192.168.100.200]
+  [Listener: HTTPS/443]
+        |
+  [Pool: ROUND_ROBIN]
+  [Health Monitor: HTTP GET /health -> 200]
+        |
+   ┌────┴─────────────────┐
+   v                      v
+  [app-vm-01]         [app-vm-02]
+  192.168.100.11      192.168.100.12
+  Port 8443           Port 8443
+
+--------------------------------------------------------------------------------
+STEP 1 — Octavia Service Health Verification
+--------------------------------------------------------------------------------
+
+All Octavia service components were confirmed running:
+
+  $ sudo systemctl status \
+      octavia-api \
+      octavia-worker \
+      octavia-health-manager \
+      octavia-housekeeping
+
+  octavia-api.service           Active: active (running)
+  octavia-worker.service        Active: active (running)
+  octavia-health-manager.service Active: active (running)
+  octavia-housekeeping.service  Active: active (running)
+
+The Amphora flavor and image were confirmed present:
+
+  $ openstack flavor list | grep amphora
+
+  +--------------------------------------+-------------------+------+------+-------+
+  | ID                                   | Name              |  RAM | Disk | VCPUs |
+  +--------------------------------------+-------------------+------+------+-------+
+  | flv-amphora-abcd-1234-000000000001   | amphora-flavor    | 1024 |    5 |     1 |
+  +--------------------------------------+-------------------+------+------+-------+
+
+  $ openstack image list | grep amphora
+
+  +--------------------------------------+------------------+--------+
+  | ID                                   | Name             | Status |
+  +--------------------------------------+------------------+--------+
+  | img-amphora-abcd-1234-000000000001   | amphora-x64-haproxy | active|
+  +--------------------------------------+------------------+--------+
+
+The HA topology was confirmed in Octavia configuration:
+
+  $ grep -E "loadbalancer_topology|amp_flavor" \
+      /etc/octavia/octavia.conf
+
+  loadbalancer_topology = ACTIVE_STANDBY
+  amp_flavor_id         = flv-amphora-abcd-1234-000000000001
+
+--------------------------------------------------------------------------------
+STEP 2 — Backend VM Readiness Verification
+--------------------------------------------------------------------------------
+
+Both backend VMs were confirmed ACTIVE:
+
+  $ openstack server list | grep -E "app-vm-01|app-vm-02"
+
+  +--------------------------------------+-----------+--------+-------------------------------------+
+  | ID                                   | Name      | Status | Networks                            |
+  +--------------------------------------+-----------+--------+-------------------------------------+
+  | vm-abcd-0001-1234-5678-000000000001  | app-vm-01 | ACTIVE | tenant-internal-net=192.168.100.11  |
+  | vm-abcd-0002-1234-5678-000000000002  | app-vm-02 | ACTIVE | tenant-internal-net=192.168.100.12  |
+  +--------------------------------------+-----------+--------+-------------------------------------+
+
+The application port was confirmed listening on both VMs:
+
+  $ ssh -i ~/.ssh/app-keypair.pem cloud-user@192.168.100.11 \
+      "sudo ss -tlnp | grep 8443"
+
+  LISTEN 0 128 0.0.0.0:8443 users:(("nginx",pid=1234,fd=6))
+
+  $ ssh -i ~/.ssh/app-keypair.pem cloud-user@192.168.100.12 \
+      "sudo ss -tlnp | grep 8443"
+
+  LISTEN 0 128 0.0.0.0:8443 users:(("nginx",pid=5678,fd=6))
+
+The health endpoint was confirmed responding on both VMs:
+
+  $ curl -sk https://192.168.100.11:8443/health
+  {"status":"UP","version":"2.1.0"}
+
+  $ curl -sk https://192.168.100.12:8443/health
+  {"status":"UP","version":"2.1.0"}
+
+--------------------------------------------------------------------------------
+STEP 3 — Load Balancer Object Creation
+--------------------------------------------------------------------------------
+
+The top-level load balancer object was created with a static VIP on the tenant
+subnet:
+
+  $ openstack loadbalancer create \
+      --name prod-app-lb \
+      --vip-subnet-id tenant-subnet-01 \
+      --vip-address 192.168.100.200 \
+      --description "Production App LB - HA Active/Standby" \
+      --wait
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | id                  | lb-abcd-1234-5678-efgh-000000000001          |
+  | name                | prod-app-lb                                  |
+  | vip_address         | 192.168.100.200                              |
+  | vip_subnet_id       | sub-abcd-1234-5678-efgh-000000000001         |
+  | operating_status    | OFFLINE                                      |
+  | provisioning_status | PENDING_CREATE                               |
+  | provider            | amphora                                      |
+  +---------------------+----------------------------------------------+
+
+Provisioning was monitored until ACTIVE status was reached
+(approximately 2-3 minutes for amphora VM spinup):
+
+  | provisioning_status | ACTIVE  |
+  | operating_status    | OFFLINE |  <- OFFLINE until listener is added
+
+Two amphora VMs were confirmed created for ACTIVE_STANDBY topology:
+
+  $ openstack server list --all-projects | grep amphora
+
+  +--------------------------------------+------------------------+--------+
+  | ID                                   | Name                   | Status |
+  +--------------------------------------+------------------------+--------+
+  | vm-amp-0001-1234-5678-000000000001   | amphora-prod-app-lb-01 | ACTIVE |
+  | vm-amp-0002-1234-5678-000000000002   | amphora-prod-app-lb-02 | ACTIVE |
+  +--------------------------------------+------------------------+--------+
+
+--------------------------------------------------------------------------------
+STEP 4 — Listener Creation
+--------------------------------------------------------------------------------
+
+An HTTPS listener was created on port 443 with a connection limit:
+
+  $ openstack loadbalancer listener create \
+      --name prod-app-listener-443 \
+      --protocol HTTPS \
+      --protocol-port 443 \
+      --connection-limit 10000 \
+      --description "HTTPS Listener port 443" \
+      --wait \
+      prod-app-lb
+
+  +---------------------------+----------------------------------------------+
+  | Field                     | Value                                        |
+  +---------------------------+----------------------------------------------+
+  | id                        | lst-abcd-1234-5678-efgh-000000000001         |
+  | name                      | prod-app-listener-443                        |
+  | protocol                  | HTTPS                                        |
+  | protocol_port             | 443                                          |
+  | connection_limit          | 10000                                        |
+  | provisioning_status       | ACTIVE                                       |
+  | operating_status          | ONLINE                                       |
+  +---------------------------+----------------------------------------------+
+
+An additional HTTP listener on port 80 was created for redirect capability:
+
+  $ openstack loadbalancer listener create \
+      --name prod-app-listener-80 \
+      --protocol HTTP \
+      --protocol-port 80 \
+      --connection-limit 10000 \
+      --wait \
+      prod-app-lb
+
+Both listeners were verified:
+
+  $ openstack loadbalancer listener list --loadbalancer prod-app-lb
+
+  +--------------------------------------+-----------------------+----------+------+--------------+
+  | id                                   | name                  | protocol | port | prov_status  |
+  +--------------------------------------+-----------------------+----------+------+--------------+
+  | lst-abcd-1234-5678-efgh-000000000001 | prod-app-listener-443 | HTTPS    |  443 | ACTIVE       |
+  | lst-abcd-1234-5678-efgh-000000000002 | prod-app-listener-80  | HTTP     |   80 | ACTIVE       |
+  +--------------------------------------+-----------------------+----------+------+--------------+
+
+--------------------------------------------------------------------------------
+STEP 5 — Pool Creation
+--------------------------------------------------------------------------------
+
+A backend pool was created with ROUND_ROBIN algorithm and HTTP_COOKIE session
+persistence for stateful application compatibility:
+
+  $ openstack loadbalancer pool create \
+      --name prod-app-pool \
+      --protocol HTTPS \
+      --lb-algorithm ROUND_ROBIN \
+      --listener prod-app-listener-443 \
+      --session-persistence type=HTTP_COOKIE \
+      --description "Production App Backend Pool" \
+      --wait
+
+  +----------------------+----------------------------------------------+
+  | Field                | Value                                        |
+  +----------------------+----------------------------------------------+
+  | id                   | pool-abcd-1234-5678-efgh-000000000001        |
+  | name                 | prod-app-pool                                |
+  | protocol             | HTTPS                                        |
+  | lb_algorithm         | ROUND_ROBIN                                  |
+  | session_persistence  | {"type": "HTTP_COOKIE"}                      |
+  | provisioning_status  | ACTIVE                                       |
+  | operating_status     | OFFLINE                                      |
+  +----------------------+----------------------------------------------+
+
+  Algorithm selection reference:
+  ROUND_ROBIN       -> Equal-weight VMs, stateless or cookie-persistent apps
+  LEAST_CONNECTIONS -> Variable load, long-lived connections
+  SOURCE_IP         -> Client affinity required, non-HTTP protocols
+
+--------------------------------------------------------------------------------
+STEP 6 — Health Monitor Configuration
+--------------------------------------------------------------------------------
+
+An HTTP health monitor was configured to check the /health endpoint
+every 10 seconds with a 3-failure threshold for member removal:
+
+  $ openstack loadbalancer healthmonitor create \
+      --name prod-app-healthmon \
+      --type HTTP \
+      --http-method GET \
+      --url-path /health \
+      --expected-codes 200 \
+      --delay 10 \
+      --timeout 5 \
+      --max-retries 3 \
+      --max-retries-down 3 \
+      --wait \
+      prod-app-pool
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | id                  | hm-abcd-1234-5678-efgh-000000000001          |
+  | name                | prod-app-healthmon                           |
+  | type                | HTTP                                         |
+  | http_method         | GET                                          |
+  | url_path            | /health                                      |
+  | expected_codes      | 200                                          |
+  | delay               | 10                                           |
+  | timeout             | 5                                            |
+  | max_retries         | 3                                            |
+  | max_retries_down    | 3                                            |
+  | provisioning_status | ACTIVE                                       |
+  | operating_status    | ONLINE                                       |
+  +---------------------+----------------------------------------------+
+
+  Health monitor logic:
+  delay          = probe every 10 seconds
+  timeout        = wait max 5 seconds for response
+  max_retries    = 3 consecutive successes -> mark ONLINE
+  max_retries_down = 3 consecutive failures -> mark ERROR, remove from pool
+  expected_codes = HTTP 200 = healthy | 4xx/5xx = unhealthy
+
+--------------------------------------------------------------------------------
+STEP 7 — Backend Member Registration
+--------------------------------------------------------------------------------
+
+app-vm-01 was added as a pool member:
+
+  $ openstack loadbalancer member create \
+      --name app-vm-01-member \
+      --address 192.168.100.11 \
+      --protocol-port 8443 \
+      --subnet-id tenant-subnet-01 \
+      --weight 1 \
+      --wait \
+      prod-app-pool
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | id                  | mem-abcd-0001-1234-5678-000000000001         |
+  | name                | app-vm-01-member                             |
+  | address             | 192.168.100.11                               |
+  | protocol_port       | 8443                                         |
+  | weight              | 1                                            |
+  | operating_status    | ONLINE                                       |
+  | provisioning_status | ACTIVE                                       |
+  +---------------------+----------------------------------------------+
+
+app-vm-02 was added as a pool member:
+
+  $ openstack loadbalancer member create \
+      --name app-vm-02-member \
+      --address 192.168.100.12 \
+      --protocol-port 8443 \
+      --subnet-id tenant-subnet-01 \
+      --weight 1 \
+      --wait \
+      prod-app-pool
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | id                  | mem-abcd-0002-1234-5678-000000000002         |
+  | name                | app-vm-02-member                             |
+  | address             | 192.168.100.12                               |
+  | protocol_port       | 8443                                         |
+  | weight              | 1                                            |
+  | operating_status    | ONLINE                                       |
+  | provisioning_status | ACTIVE                                       |
+  +---------------------+----------------------------------------------+
+
+Both members were confirmed ONLINE (health monitor passing):
+
+  $ openstack loadbalancer member list prod-app-pool
+
+  +--------------------------------------+------------------+----------------+------+-----------------+
+  | id                                   | name             | address        | port | operating_status|
+  +--------------------------------------+------------------+----------------+------+-----------------+
+  | mem-abcd-0001-...                    | app-vm-01-member | 192.168.100.11 | 8443 | ONLINE          |
+  | mem-abcd-0002-...                    | app-vm-02-member | 192.168.100.12 | 8443 | ONLINE          |
+  +--------------------------------------+------------------+----------------+------+-----------------+
+
+--------------------------------------------------------------------------------
+STEP 8 — Floating IP Association to LB VIP
+--------------------------------------------------------------------------------
+
+The VIP port ID was retrieved:
+
+  $ openstack loadbalancer show prod-app-lb | grep vip_port_id
+
+  | vip_port_id | port-vip-abcd-1234-5678-efgh-000000000001 |
+
+A floating IP was allocated:
+
+  $ openstack floating ip create external-net
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | id                  | fip-abcd-0010-1234-5678-000000000010         |
+  | floating_ip_address | 10.50.0.150                                  |
+  | status              | DOWN                                         |
+  +---------------------+----------------------------------------------+
+
+The floating IP was associated to the LB VIP port (not to a VM):
+
+  $ openstack floating ip set \
+      --port port-vip-abcd-1234-5678-efgh-000000000001 \
+      10.50.0.150
+
+  $ openstack floating ip show 10.50.0.150
+
+  +---------------------+----------------------------------------------+
+  | Field               | Value                                        |
+  +---------------------+----------------------------------------------+
+  | floating_ip_address | 10.50.0.150                                  |
+  | fixed_ip_address    | 192.168.100.200                              |
+  | status              | ACTIVE                                       |
+  | port_id             | port-vip-abcd-1234-5678-efgh-000000000001    |
+  +---------------------+----------------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 9 — End-to-End Connectivity and Failover Validation
+--------------------------------------------------------------------------------
+
+Full LBaaS component status was reviewed in one command:
+
+  $ openstack loadbalancer status show prod-app-lb
+
+  {
+    "loadbalancer": {
+      "name": "prod-app-lb",
+      "operating_status": "ONLINE",
+      "provisioning_status": "ACTIVE",
+      "listeners": [{
+        "name": "prod-app-listener-443",
+        "operating_status": "ONLINE",
+        "pools": [{
+          "name": "prod-app-pool",
+          "operating_status": "ONLINE",
+          "health_monitor": {
+            "name": "prod-app-healthmon",
+            "operating_status": "ONLINE"
+          },
+          "members": [
+            {"name": "app-vm-01-member", "operating_status": "ONLINE"},
+            {"name": "app-vm-02-member", "operating_status": "ONLINE"}
+          ]
+        }]
+      }]
+    }
+  }
+
+ROUND_ROBIN traffic distribution was verified:
+
+  $ for i in {1..6}; do
+      curl -sk https://10.50.0.150/health | python3 -m json.tool \
+        | grep hostname
+    done
+
+  "hostname": "app-vm-01"   <- request 1
+  "hostname": "app-vm-02"   <- request 2
+  "hostname": "app-vm-01"   <- request 3
+  "hostname": "app-vm-02"   <- request 4
+  "hostname": "app-vm-01"   <- request 5
+  "hostname": "app-vm-02"   <- request 6
+
+  -> Perfect ROUND_ROBIN alternation confirmed.
+
+Failover was tested by stopping the application on app-vm-01:
+
+  $ ssh -i ~/.ssh/app-keypair.pem cloud-user@192.168.100.11 \
+      "sudo systemctl stop nginx"
+
+After 35 seconds (3 health check failures), the member was confirmed ERROR:
+
+  $ openstack loadbalancer member list prod-app-pool
+
+  +------------------+----------------+------+------------------+
+  | name             | address        | port | operating_status |
+  +------------------+----------------+------+------------------+
+  | app-vm-01-member | 192.168.100.11 | 8443 | ERROR            |
+  | app-vm-02-member | 192.168.100.12 | 8443 | ONLINE           |
+  +------------------+----------------+------+------------------+
+
+All traffic was confirmed routing to the healthy member only:
+
+  $ for i in {1..4}; do
+      curl -sk https://10.50.0.150/health | grep hostname
+    done
+
+  "hostname": "app-vm-02"
+  "hostname": "app-vm-02"
+  "hostname": "app-vm-02"
+  "hostname": "app-vm-02"
+
+Nginx was restored on app-vm-01 and member recovery was confirmed:
+
+  $ ssh -i ~/.ssh/app-keypair.pem cloud-user@192.168.100.11 \
+      "sudo systemctl start nginx"
+
+  $ sleep 35
+
+  $ openstack loadbalancer member list prod-app-pool
+
+  | app-vm-01-member | 192.168.100.11 | 8443 | ONLINE |  <- recovered
+  | app-vm-02-member | 192.168.100.12 | 8443 | ONLINE |
+
+--------------------------------------------------------------------------------
+STEP 10 — Amphora HA Failover Verification
+--------------------------------------------------------------------------------
+
+Active and standby amphora roles were confirmed:
+
+  $ openstack loadbalancer amphora list --loadbalancer prod-app-lb
+
+  +--------------------------------------+--------+--------+
+  | id                                   | status | role   |
+  +--------------------------------------+--------+--------+
+  | amp-abcd-0001-1234-5678-000000000001 | ALLOC  | MASTER |
+  | amp-abcd-0002-1234-5678-000000000002 | ALLOC  | BACKUP |
+  +--------------------------------------+--------+--------+
+
+The active amphora was stopped to simulate a failure:
+
+  $ openstack server stop amphora-prod-app-lb-01
+
+Traffic continuity via the BACKUP amphora (VRRP failover) was confirmed:
+
+  $ curl -sk https://10.50.0.150/health
+
+  {"status":"UP","version":"2.1.0"}   <- no service interruption
+
+Octavia automatically provisioned a replacement amphora within 2 minutes:
+
+  $ openstack loadbalancer amphora list --loadbalancer prod-app-lb
+
+  | amp-abcd-0003-... | ALLOC | MASTER |  <- new active amphora
+  | amp-abcd-0002-... | ALLOC | BACKUP |  <- original backup promoted
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Octavia services and amphora confirmed healthy before configuration
+  - Load balancer created with VIP 192.168.100.200 on tenant subnet
+  - HTTPS listener on port 443 and HTTP listener on port 80 configured
+  - Pool created with ROUND_ROBIN algorithm and HTTP_COOKIE persistence
+  - Health monitor configured (GET /health, 10s interval, 3-retry threshold)
+  - Both backend members added on port 8443 and confirmed ONLINE
+  - Floating IP 10.50.0.150 associated to LB VIP port (not VM)
+  - ROUND_ROBIN traffic distribution validated across 6 sequential requests
+  - Member failover tested: app-vm-01 marked ERROR after 3 health failures
+  - Member recovery validated after nginx restart on app-vm-01
+  - Amphora ACTIVE_STANDBY failover tested — no service interruption observed
+
+================================================================================
+END OF LAB — SCENARIO 09
+================================================================================
