@@ -1,0 +1,390 @@
+================================================================================
+ LAB SCENARIO 08 — Resource Quota Increase
+ Topic   : Quota Increase Validation — Utilization, Infrastructure
+           Headroom, Over-Commit Analysis, and Controlled Application
+================================================================================
+
+OBJECTIVE
+---------
+A quota increase request was received for the prod-ecommerce-project to
+support a new microservices rollout requiring 15 additional VMs. Prior to
+any change being applied, three validation checks were performed: current
+utilization vs. existing quota, physical infrastructure headroom across
+all compute nodes, and over-commit ratio safety math. The quota was then
+applied with before/after documentation and logged for audit.
+
+--------------------------------------------------------------------------------
+QUOTA INCREASE REQUEST (FROM TICKET CHG0042891)
+--------------------------------------------------------------------------------
+
+  Project     : prod-ecommerce-project
+  Requested by: app-team-lead@company.com
+  Reason      : New microservices rollout — 15 new VMs required
+
+  Resource          Current    Requested
+  ─────────────────────────────────────────
+  vCPU              40         120
+  RAM (MB)          81920      245760    (80GB -> 240GB)
+  Instances         20         60
+  Volumes           20         50
+  Storage (GB)      2000       6000
+  Floating IPs      10         25
+  Security Groups   10         20
+  ─────────────────────────────────────────
+
+  $ source /etc/openstack/admin-openrc.sh
+
+--------------------------------------------------------------------------------
+STEP 1 — Current Quota Utilization Check
+--------------------------------------------------------------------------------
+
+Current quota and usage were reviewed together:
+
+  $ openstack quota show --usage prod-ecommerce-project
+
+  +----------------------+-------+------+----------+
+  | Resource             | Limit | Used | Reserved |
+  +----------------------+-------+------+----------+
+  | cores                |    40 |   28 |        4 |
+  | ram                  | 81920 |57344 |     8192 |
+  | instances            |    20 |   14 |        2 |
+  | volumes              |    20 |   12 |        0 |
+  | gigabytes            |  2000 | 1400 |        0 |
+  | floating_ips         |    10 |    7 |        0 |
+  | security_groups      |    10 |    6 |        0 |
+  | security_group_rules |    50 |   28 |        0 |
+  | networks             |     5 |    2 |        0 |
+  | routers              |     2 |    1 |        0 |
+  | ports                |   100 |   32 |        0 |
+  | snapshots            |    10 |    4 |        0 |
+  +----------------------+-------+------+----------+
+
+Utilization percentage was calculated per resource:
+
+  $ python3 -c "
+  resources = {
+      'vCPU'        : (28+4,  40),
+      'RAM'         : (57344+8192, 81920),
+      'Instances'   : (14+2,  20),
+      'Volumes'     : (12,    20),
+      'Storage GB'  : (1400,  2000),
+      'Floating IPs': (7,     10),
+  }
+  print(f'{'Resource':<15} {'Used+Rsv':>10} {'Limit':>8} {'Util%':>8}')
+  print('-' * 50)
+  for r,(used,limit) in resources.items():
+      pct = (used/limit)*100
+      flag = 'HIGH' if pct >= 80 else 'OK'
+      print(f'{r:<15} {used:>10} {limit:>8} {pct:>7.1f}%  {flag}')
+  "
+
+  Resource        Used+Rsv    Limit    Util%
+  ──────────────────────────────────────────────
+  vCPU                  32       40     80.0%  HIGH
+  RAM               65536    81920     80.0%  HIGH
+  Instances             16       20     80.0%  HIGH
+  Volumes               12       20     60.0%  OK
+  Storage GB          1400     2000     70.0%  OK
+  Floating IPs           7       10     70.0%  OK
+
+  -> Compute resources at 80% utilization. Increase is justified.
+  -> Storage at 60-70%. Moderate but acceptable justification.
+
+--------------------------------------------------------------------------------
+STEP 2 — Compute Node Headroom Validation
+--------------------------------------------------------------------------------
+
+All compute nodes were inspected for available capacity:
+
+  $ openstack host show compute-node-01
+
+  +------------------+------------+-----+-----------+---------+
+  | HOST             | PROJECT    | CPU | MEMORY_MB | DISK_GB |
+  +------------------+------------+-----+-----------+---------+
+  | compute-node-01  | (total)    |  64 |    196608 |    1000 |
+  | compute-node-01  | (used_now) |  38 |    131072 |     420 |
+  | compute-node-01  | (used_max) |  52 |    163840 |     560 |
+  +------------------+------------+-----+-----------+---------+
+
+  $ openstack host show compute-node-02
+
+  +------------------+------------+-----+-----------+---------+
+  | HOST             | PROJECT    | CPU | MEMORY_MB | DISK_GB |
+  +------------------+------------+-----+-----------+---------+
+  | compute-node-02  | (total)    |  64 |    196608 |    1000 |
+  | compute-node-02  | (used_now) |  42 |    147456 |     480 |
+  | compute-node-02  | (used_max) |  56 |    172032 |     600 |
+  +------------------+------------+-----+-----------+---------+
+
+  $ openstack host show compute-node-03
+
+  +------------------+------------+-----+-----------+---------+
+  | HOST             | PROJECT    | CPU | MEMORY_MB | DISK_GB |
+  +------------------+------------+-----+-----------+---------+
+  | compute-node-03  | (total)    |  64 |    196608 |    1000 |
+  | compute-node-03  | (used_now) |  30 |     98304 |     360 |
+  | compute-node-03  | (used_max) |  44 |    131072 |     480 |
+  +------------------+------------+-----+-----------+---------+
+
+  $ openstack host show compute-node-04
+
+  +------------------+------------+-----+-----------+---------+
+  | HOST             | PROJECT    | CPU | MEMORY_MB | DISK_GB |
+  +------------------+------------+-----+-----------+---------+
+  | compute-node-04  | (total)    |  64 |    196608 |    1000 |
+  | compute-node-04  | (used_now) |  25 |     81920 |     300 |
+  | compute-node-04  | (used_max) |  38 |    114688 |     420 |
+  +------------------+------------+-----+-----------+---------+
+
+Cluster aggregate capacity was calculated:
+
+  $ python3 -c "
+  nodes = {
+    'compute-node-01': {'total_cpu':64,'used_cpu':38,'total_ram':196608,'used_ram':131072},
+    'compute-node-02': {'total_cpu':64,'used_cpu':42,'total_ram':196608,'used_ram':147456},
+    'compute-node-03': {'total_cpu':64,'used_cpu':30,'total_ram':196608,'used_ram':98304},
+    'compute-node-04': {'total_cpu':64,'used_cpu':25,'total_ram':196608,'used_ram':81920},
+  }
+  total_cpu = sum(n['total_cpu'] for n in nodes.values())
+  used_cpu  = sum(n['used_cpu']  for n in nodes.values())
+  total_ram = sum(n['total_ram'] for n in nodes.values())
+  used_ram  = sum(n['used_ram']  for n in nodes.values())
+  free_cpu  = total_cpu - used_cpu
+  free_ram  = total_ram - used_ram
+  print(f'Cluster vCPU  : Total={total_cpu}  Used={used_cpu}  Free={free_cpu}')
+  print(f'Cluster RAM MB: Total={total_ram}  Used={used_ram}  Free={free_ram}')
+  print(f'vCPU increase request : 80 additional cores')
+  print(f'RAM  increase request : 163840 MB additional')
+  print(f'Can fulfil vCPU : {\"YES\" if free_cpu  >= 80 else \"NO\"}')
+  print(f'Can fulfil RAM  : {\"YES\" if free_ram  >= 163840 else \"NO\"}')
+  "
+
+  Cluster vCPU  : Total=256  Used=135  Free=121
+  Cluster RAM MB: Total=786432  Used=458752  Free=327680
+  vCPU increase request : 80 additional cores
+  RAM  increase request : 163840 MB additional
+  Can fulfil vCPU : YES   (121 free >= 80 requested)
+  Can fulfil RAM  : YES   (327680 free >= 163840 requested)
+
+--------------------------------------------------------------------------------
+STEP 3 — Cinder Storage Headroom Validation
+--------------------------------------------------------------------------------
+
+Cinder backend pool availability was reviewed:
+
+  $ openstack volume pool list --detail
+
+  +------------------------+-----------+----------+----------+-----------+
+  | Name                   | Backend   | Total    | Free     | Allocated |
+  +------------------------+-----------+----------+----------+-----------+
+  | ceph-ssd@ceph-ssd#pool | ceph-ssd  | 50.0 TiB | 32.4 TiB | 17.6 TiB |
+  | ceph-hdd@ceph-hdd#pool | ceph-hdd  |100.0 TiB | 74.2 TiB | 25.8 TiB |
+  +------------------------+-----------+----------+----------+-----------+
+
+Ceph cluster raw storage was confirmed:
+
+  $ ceph df
+
+  CLASS    SIZE      AVAIL     USED
+  ssd      50 TiB   33.2 TiB  16.8 TiB     33.60%
+  hdd     100 TiB   75.0 TiB  25.0 TiB     25.00%
+  TOTAL   150 TiB  108.2 TiB  41.8 TiB     27.87%
+
+  -> 4TB additional storage requested (6000-2000=4000GB)
+  -> Ceph SSD pool free: 33.2TiB = approximately 34,000GB
+  -> 4000GB requested << 34000GB available. Storage headroom confirmed.
+
+--------------------------------------------------------------------------------
+STEP 4 — Floating IP Pool Validation
+--------------------------------------------------------------------------------
+
+Currently allocated floating IPs were counted:
+
+  $ openstack floating ip list --all-projects | wc -l
+
+  47   <- currently allocated
+
+The external subnet allocation pool was reviewed:
+
+  $ openstack subnet show external-subnet-01 \
+      | grep -E "allocation_pools|cidr"
+
+  | allocation_pools | 10.50.0.100-10.50.0.200 |
+  | cidr             | 10.50.0.0/24            |
+
+  Pool size   : 101 IPs (10.50.0.100 to 10.50.0.200)
+  Allocated   : 47
+  Available   : 54
+  Requested   : 15 additional FIPs (25 - 10)
+  -> 15 requested << 54 available. FIP pool headroom confirmed.
+
+Unassociated FIPs in the requesting project were identified:
+
+  $ openstack floating ip list \
+      --project prod-ecommerce-project \
+      | grep "None"
+
+  | fip-abcd-0006-... | 10.50.0.106 | None |  <- unassociated
+  | fip-abcd-0007-... | 10.50.0.107 | None |  <- unassociated
+
+  -> 2 existing FIPs are unassociated. The team was requested to
+     release these before the FIP quota increase was applied.
+
+--------------------------------------------------------------------------------
+STEP 5 — Over-Commit Ratio Safety Analysis
+--------------------------------------------------------------------------------
+
+The quota increase was validated against cluster over-commit ratios from
+nova.conf to ensure stability for all tenants:
+
+  $ python3 -c "
+  cluster_total_cpu = 256
+  cluster_total_ram = 786432
+
+  total_granted_cpu = 280
+  total_granted_ram = 614400
+
+  cpu_overcommit = 4.0
+  ram_overcommit = 1.5
+
+  effective_cpu = cluster_total_cpu * cpu_overcommit
+  effective_ram = cluster_total_ram * ram_overcommit
+
+  new_cpu = total_granted_cpu + 80
+  new_ram = total_granted_ram + 163840
+
+  print(f'Effective vCPU (4x OC)  : {effective_cpu}')
+  print(f'Effective RAM  (1.5x OC): {effective_ram} MB')
+  print(f'After increase — CPU: {new_cpu}  RAM: {new_ram}MB')
+  print(f'CPU safe: {\"YES\" if new_cpu <= effective_cpu else \"NO\"}')
+  print(f'RAM safe: {\"YES\" if new_ram <= effective_ram else \"NO\"}')
+  "
+
+  Effective vCPU (4x OC)  : 1024
+  Effective RAM  (1.5x OC): 1179648 MB
+  After increase — CPU: 360  RAM: 778240MB
+  CPU safe: YES
+  RAM safe: YES
+
+  -> All validations passed. Quota increase approved.
+
+--------------------------------------------------------------------------------
+STEP 6 — Quota Increase Application
+--------------------------------------------------------------------------------
+
+The current state was recorded before applying any change:
+
+  $ openstack quota show prod-ecommerce-project \
+      > /var/log/openstack/quota-before-20260518-ecommerce.txt
+
+Compute quota was updated:
+
+  $ openstack quota set \
+      --cores 120 \
+      --ram 245760 \
+      --instances 60 \
+      --key-pairs 20 \
+      prod-ecommerce-project
+
+Storage quota was updated:
+
+  $ openstack quota set \
+      --volumes 50 \
+      --snapshots 25 \
+      --gigabytes 6000 \
+      --backups 30 \
+      --backup-gigabytes 10000 \
+      prod-ecommerce-project
+
+Network quota was updated:
+
+  $ openstack quota set \
+      --floating-ips 25 \
+      --security-groups 20 \
+      --security-group-rules 100 \
+      --ports 200 \
+      prod-ecommerce-project
+
+All applied quotas were verified:
+
+  $ openstack quota show prod-ecommerce-project
+
+  +----------------------+--------+
+  | Resource             | Limit  |
+  +----------------------+--------+
+  | cores                |    120 | <- was 40
+  | ram                  | 245760 | <- was 81920
+  | instances            |     60 | <- was 20
+  | volumes              |     50 | <- was 20
+  | gigabytes            |   6000 | <- was 2000
+  | floating_ips         |     25 | <- was 10
+  | security_groups      |     20 | <- was 10
+  | security_group_rules |    100 | <- was 50
+  +----------------------+--------+
+
+The post-change state was recorded and a diff was generated:
+
+  $ openstack quota show prod-ecommerce-project \
+      > /var/log/openstack/quota-after-20260518-ecommerce.txt
+
+  $ diff \
+      /var/log/openstack/quota-before-20260518-ecommerce.txt \
+      /var/log/openstack/quota-after-20260518-ecommerce.txt
+
+--------------------------------------------------------------------------------
+STEP 7 — Audit Log Entry
+--------------------------------------------------------------------------------
+
+The change was appended to the quota audit log:
+
+  $ cat >> /var/log/openstack/quota-changes.log << EOF
+  $(date '+%Y-%m-%d %H:%M') | APPROVED | project=prod-ecommerce-project \
+  | approved_by=infra-admin-01 | ticket=CHG0042891 \
+  | cores:40->120 ram:81920->245760 instances:20->60 \
+  | volumes:20->50 gigabytes:2000->6000 floating_ips:10->25
+  EOF
+
+  $ tail -1 /var/log/openstack/quota-changes.log
+
+  2026-05-18 11:30 | APPROVED | project=prod-ecommerce-project \
+  | approved_by=infra-admin-01 | ticket=CHG0042891 \
+  | cores:40->120 ram:81920->245760 instances:20->60 \
+  | volumes:20->50 gigabytes:2000->6000 floating_ips:10->25
+
+--------------------------------------------------------------------------------
+NOTE — Partial Approval Scenario
+--------------------------------------------------------------------------------
+
+When infrastructure headroom does not support the full request, a partial
+approval is applied with a documented review date:
+
+  $ openstack quota set \
+      --cores 120 \
+      --ram 245760 \
+      --instances 60 \
+      --gigabytes 4000 \    <- partial: 4000GB approved vs 6000GB requested
+      prod-ecommerce-project
+
+  Reason documented in ticket:
+  Storage partially approved (4000GB of 6000GB requested).
+  Ceph SSD pool at 65% utilization. New storage nodes provisioning
+  in progress. Full 6000GB to be granted by 2026-06-01.
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Utilization validated: compute at 80% — increase justified
+  - Infrastructure headroom confirmed: 121 free vCPUs, 327GB free RAM
+  - Ceph storage headroom: 33TB free vs 4TB requested
+  - Floating IP pool: 54 available vs 15 requested
+  - 2 unassociated FIPs identified — team notified to release
+  - Over-commit math confirmed safe: effective CPU 1024, effective RAM 1.17TB
+  - Quota applied: 120 vCPU / 240GB RAM / 60 instances / 6TB storage / 25 FIPs
+  - Audit log entry recorded with ticket reference CHG0042891
+
+================================================================================
+END OF LAB — SCENARIO 08
+================================================================================
