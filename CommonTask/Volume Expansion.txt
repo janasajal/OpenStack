@@ -1,0 +1,262 @@
+================================================================================
+ LAB SCENARIO 03 — Volume Expansion (Online, Zero Downtime)
+ Topic   : Cinder Volume Extension for a Running Production VM
+           Including Partition and Filesystem Resize
+================================================================================
+
+OBJECTIVE
+---------
+A production VM was observed to be approaching storage utilization threshold
+on its attached Cinder data volume. The volume was required to be expanded from
+100GB to 200GB without service interruption. The expansion was performed at the
+Cinder layer first, followed by partition resize and filesystem extension inside
+the running VM.
+
+--------------------------------------------------------------------------------
+STEP 1 — Current State Assessment
+--------------------------------------------------------------------------------
+
+The volume details and attachment status were reviewed:
+
+  $ openstack volume list --long
+
+  +--------------------------------------+--------------------+--------+------+----------+-------------------------------+
+  | ID                                   | Name               | Status | Size | Type     | Attached to                   |
+  +--------------------------------------+--------------------+--------+------+----------+-------------------------------+
+  | vol-abcd-1234-5678-efgh-000000000001 | prod-vm-01-datadisk| in-use |  100 | ceph-ssd | prod-vm-01 on /dev/vdb        |
+  +--------------------------------------+--------------------+--------+------+----------+-------------------------------+
+
+Full volume details were confirmed:
+
+  $ openstack volume show prod-vm-01-datadisk
+
+  +------------------------------+--------------------------------------+
+  | Field                        | Value                                |
+  +------------------------------+--------------------------------------+
+  | id                           | vol-abcd-1234-5678-efgh-000000000001 |
+  | name                         | prod-vm-01-datadisk                  |
+  | status                       | in-use                               |
+  | size                         | 100                                  |
+  | type                         | ceph-ssd                             |
+  | attachments                  | prod-vm-01 -> /dev/vdb               |
+  | encrypted                    | False                                |
+  | replication_status           | enabled                              |
+  +------------------------------+--------------------------------------+
+
+Disk utilization was checked inside the running VM:
+
+  $ ssh -i ~/.ssh/prod-keypair.pem cloud-user@prod-vm-01
+
+  [cloud-user@prod-vm-01 ~]$ df -hT
+
+  Filesystem     Type      Size  Used Avail Use% Mounted on
+  devtmpfs       devtmpfs  3.8G     0  3.8G   0% /dev
+  /dev/vda1      xfs        40G   12G   28G  30% /
+  /dev/vdb1      xfs       100G   91G    9G  91% <- threshold reached
+  tmpfs          tmpfs     3.9G     0  3.9G   0% /tmp
+
+Block device and partition layout were noted:
+
+  [cloud-user@prod-vm-01 ~]$ lsblk
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vda    252:0    0   40G  0 disk
+  └─vda1 252:1    0   40G  0 part /
+  vdb    252:16   0  100G  0 disk
+  └─vdb1 252:17   0  100G  0 part /data
+
+The filesystem type was confirmed:
+
+  [cloud-user@prod-vm-01 ~]$ blkid /dev/vdb1
+
+  /dev/vdb1: UUID="abcd-1234-efgh-5678" TYPE="xfs" PARTLABEL="data"
+
+--------------------------------------------------------------------------------
+STEP 2 — Pre-Expansion Snapshot (Safety Baseline)
+--------------------------------------------------------------------------------
+
+A volume snapshot was taken before any modification was performed:
+
+  $ openstack volume snapshot create \
+      --volume prod-vm-01-datadisk \
+      --description "Pre-expansion snapshot - $(date +%Y%m%d)" \
+      prod-vm-01-datadisk-snap-20260518
+
+  +-------------+--------------------------------------+
+  | Field       | Value                                |
+  +-------------+--------------------------------------+
+  | id          | snap-abcd-1234-5678-efgh-000000001   |
+  | name        | prod-vm-01-datadisk-snap-20260518    |
+  | volume_id   | vol-abcd-1234-5678-efgh-000000000001 |
+  | size        | 100                                  |
+  | status      | creating                             |
+  +-------------+--------------------------------------+
+
+Snapshot availability was confirmed before proceeding:
+
+  $ openstack volume snapshot show prod-vm-01-datadisk-snap-20260518 \
+      | grep status
+
+  | status | available |
+
+--------------------------------------------------------------------------------
+STEP 3 — Cinder Volume Extension
+--------------------------------------------------------------------------------
+
+The volume was extended from 100GB to 200GB while in-use (online extension
+is supported with the Ceph backend in modern OpenStack):
+
+  $ openstack volume set \
+      --size 200 \
+      prod-vm-01-datadisk
+
+The new size was confirmed from the Cinder perspective:
+
+  $ openstack volume show prod-vm-01-datadisk | grep -E "size|status"
+
+  | size   | 200    |
+  | status | in-use |
+
+The Nova attachment was confirmed to remain intact:
+
+  $ openstack server show prod-vm-01 | grep volumes_attached
+
+  | volumes_attached | id='vol-abcd-1234-5678-efgh-000000000001' |
+
+--------------------------------------------------------------------------------
+STEP 4 — Kernel Block Device Rescan Inside the VM
+--------------------------------------------------------------------------------
+
+The kernel was checked to confirm whether it had detected the new disk size:
+
+  [cloud-user@prod-vm-01 ~]$ lsblk
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vda    252:0    0   40G  0 disk
+  └─vda1 252:1    0   40G  0 part /
+  vdb    252:16   0  200G  0 disk   <- kernel sees new size
+  └─vdb1 252:17   0  100G  0 part /data  <- partition still old size
+
+In cases where the kernel had not reflected the new size, a rescan was
+triggered:
+
+  [cloud-user@prod-vm-01 ~]$ sudo bash -c \
+      'echo 1 > /sys/class/block/vdb/device/rescan'
+
+--------------------------------------------------------------------------------
+STEP 5 — Online Partition Extension
+--------------------------------------------------------------------------------
+
+The growpart utility was used to extend the partition to fill the newly
+available disk space, without unmounting the filesystem:
+
+  $ sudo dnf install -y cloud-utils-growpart
+
+  $ sudo growpart /dev/vdb 1
+
+  CHANGED: partition=1 start=2048 old: size=209713152 end=209715200
+           new: size=419428319 end=419430367
+
+The partition size was verified:
+
+  [cloud-user@prod-vm-01 ~]$ lsblk
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vdb    252:16   0  200G  0 disk
+  └─vdb1 252:17   0  200G  0 part /data  <- partition now reflects 200GB
+
+--------------------------------------------------------------------------------
+STEP 6 — Online Filesystem Extension (XFS)
+--------------------------------------------------------------------------------
+
+The XFS filesystem was extended online while the mount point remained active.
+xfs_growfs was used since the filesystem type was XFS. For ext4 filesystems,
+resize2fs would have been used instead:
+
+  [cloud-user@prod-vm-01 ~]$ sudo xfs_growfs /data
+
+  meta-data=/dev/vdb1    isize=512  agcount=4, agsize=6553472 blks
+           =             sectsz=512 attr=2, projid32bit=1
+  data     =             bsize=4096 blocks=26214144, imaxpct=25
+           =             sunit=0    swidth=0 blks
+  naming   =version 2   bsize=4096 ascii-ci=0, ftype=1
+  log      =internal     bsize=4096 blocks=12799, version=2
+  realtime =none         extsz=4096 blocks=0, rtextents=0
+  data blocks changed from 26214144 to 52428539   <- filesystem expanded
+
+--------------------------------------------------------------------------------
+STEP 7 — Final Validation
+--------------------------------------------------------------------------------
+
+Filesystem utilization was confirmed at the new 200GB size:
+
+  [cloud-user@prod-vm-01 ~]$ df -hT /data
+
+  Filesystem     Type  Size  Used Avail Use% Mounted on
+  /dev/vdb1      xfs   200G   91G  109G  46% /data  <- utilization 46%
+
+Block device layout was re-verified:
+
+  [cloud-user@prod-vm-01 ~]$ lsblk /dev/vdb
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vdb    252:16   0  200G  0 disk
+  └─vdb1 252:17   0  200G  0 part /data
+
+The Cinder volume size was confirmed from the OpenStack side:
+
+  $ openstack volume show prod-vm-01-datadisk | grep -E "size|status"
+
+  | size   | 200    |
+  | status | in-use |
+
+The VM remained in ACTIVE state throughout the operation:
+
+  $ openstack server show prod-vm-01 | grep -E "status|power_state"
+
+  | status      | ACTIVE  |
+  | power_state | Running |
+
+--------------------------------------------------------------------------------
+NOTE — Boot Volume Expansion (Special Case)
+--------------------------------------------------------------------------------
+
+When the root volume (/dev/vda) requires expansion, a different approach is
+followed since online root resize carries higher risk. The recommended
+procedure is:
+
+  1. Snapshot the boot volume first
+     $ openstack volume snapshot create \
+         --volume prod-vm-01-bootvol \
+         prod-vm-01-bootvol-snap-20260518
+
+  2. Stop the instance cleanly
+     $ openstack server stop prod-vm-01
+
+  3. Extend the boot volume
+     $ openstack volume set --size 80 prod-vm-01-bootvol
+
+  4. Start the instance
+     $ openstack server start prod-vm-01
+
+  5. Inside the VM — extend partition and filesystem
+     $ sudo growpart /dev/vda 1
+     $ sudo xfs_growfs /
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Volume extended from 100GB to 200GB with no VM downtime
+  - Kernel block device reflected new size without manual rescan
+  - Partition extended using growpart (no unmount required)
+  - XFS filesystem extended online using xfs_growfs
+  - Utilization reduced from 91% to 46% post-expansion
+  - VM remained ACTIVE throughout the entire operation
+  - Pre-expansion snapshot retained as recovery baseline
+
+================================================================================
+END OF LAB — SCENARIO 03
+================================================================================
