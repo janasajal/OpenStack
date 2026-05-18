@@ -1,0 +1,292 @@
+================================================================
+NEUTRON (NETWORKING SERVICE)
+OpenStack Administration Lab Notes
+================================================================
+
+WHAT IS NEUTRON?
+----------------
+Neutron provides Networking as a Service in OpenStack.
+It manages everything related to virtual networking:
+  - Creating and managing virtual networks and subnets
+  - Routing traffic between networks
+  - Providing external access via floating IPs
+  - Enforcing security rules via security groups
+
+KEY CONCEPTS:
+  - Network       : Virtual switch, isolated layer 2 segment
+  - Subnet        : IP address range inside a network
+  - Router        : Connects networks, provides external access
+  - Port          : Virtual NIC, connects VM to network
+  - Security Group: Virtual firewall rules for VMs
+  - Floating IP   : Public IP mapped to private VM IP
+
+NETWORK TYPES:
+  - flat    : No encapsulation, used for external/public networks
+  - geneve  : Overlay tunnel, used for tenant/private networks
+  - vlan    : 802.1Q VLAN tagging for isolation
+
+NETWORK TOPOLOGY IN OUR LAB:
+  Internet
+     |
+  public network (flat, 172.24.4.0/24)
+     |
+  myroute (router with SNAT)
+     |
+  mysubnet (192.168.100.0/24)
+     |
+  mynetwork (geneve overlay)
+     |
+  VM (192.168.100.x)
+
+================================================================
+LAB COMMANDS & OUTPUT
+================================================================
+
+1. LIST NETWORKS IN DETAIL
+--------------------------
+Purpose: See all networks with type and ownership information
+
+  $ openstack network list --long
+
+  Output:
+  +------+----------+--------+-------------+----------+
+  | Name | Status   | Shared | Network Type | Router  |
+  +------+----------+--------+-------------+----------+
+  | shared  | ACTIVE | True  | geneve      | Internal |
+  | private | ACTIVE | False | geneve      | Internal |
+  | public  | ACTIVE | False | flat        | External |
+  +------+----------+--------+-------------+----------+
+
+EXPLANATION:
+  - Network Type: geneve = overlay tunnel for tenant isolation
+  - Network Type: flat   = no encapsulation, for external network
+  - Router Type: External = provider/public network
+  - Router Type: Internal = tenant network
+  - Shared: True = all projects can use this network
+
+
+2. CREATE A TENANT NETWORK
+--------------------------
+Purpose: Create an isolated private network for VMs
+
+  $ openstack network create mynetwork
+
+  Output:
+  +---------------------------+--------------------------------------+
+  | Field                     | Value                                |
+  +---------------------------+--------------------------------------+
+  | admin_state_up            | UP                                   |
+  | provider:network_type     | geneve                               |
+  | provider:segmentation_id  | 60232                                |
+  | port_security_enabled     | True                                 |
+  | shared                    | False                                |
+  | status                    | ACTIVE                               |
+  | subnets                   |                                      |
+  +---------------------------+--------------------------------------+
+
+EXPLANATION:
+  - provider:network_type: geneve = overlay network
+  - segmentation_id: 60232 = unique tunnel ID for isolation
+  - port_security_enabled: True = security rules enforced
+  - subnets: empty = no IP range assigned yet
+
+
+3. CREATE A SUBNET
+------------------
+Purpose: Define IP address range, gateway and DNS for the network
+
+  $ openstack subnet create \
+    --network mynetwork \
+    --subnet-range 192.168.100.0/24 \
+    --gateway 192.168.100.1 \
+    --dns-nameserver 8.8.8.8 \
+    mysubnet
+
+  Output:
+  +----------------------+--------------------------------------+
+  | Field                | Value                                |
+  +----------------------+--------------------------------------+
+  | allocation_pools     | 192.168.100.2-192.168.100.254        |
+  | cidr                 | 192.168.100.0/24                     |
+  | enable_dhcp          | True                                 |
+  | gateway_ip           | 192.168.100.1                        |
+  | dns_nameservers      | 8.8.8.8                              |
+  +----------------------+--------------------------------------+
+
+EXPLANATION:
+  - cidr             : 192.168.100.0/24 supports 254 hosts
+  - allocation_pools : DHCP assigns IPs from this range to VMs
+  - gateway_ip       : Default gateway for VMs
+  - enable_dhcp      : True = VMs get IP automatically
+  - dns_nameservers  : VMs use Google DNS
+
+
+4. CREATE A ROUTER
+------------------
+Purpose: Connect tenant network to public network for internet access
+
+  $ openstack router create myroute
+
+  $ openstack router set --external-gateway public myroute
+
+  $ openstack router add subnet myroute mysubnet
+
+  $ openstack router show myroute | grep -E "gateway|interfaces"
+
+  Output:
+  | external_gateway_info | {"network_id": "...", 
+  |                        |  "ip_address": "172.24.4.89",
+  |                        |  "enable_snat": true}           |
+  | interfaces_info       | [{"ip_address": "192.168.100.1",
+  |                        |   "subnet_id": "..."}]          |
+
+EXPLANATION:
+  - external_gateway_info : Router connected to public network
+  - ip_address: 172.24.4.89 : Router's public IP
+  - enable_snat: true : VMs can reach internet via NAT
+  - interfaces_info : Our subnet 192.168.100.1 is attached
+  - Router acts like a home router: LAN -> WAN
+
+
+5. CREATE SECURITY GROUP
+-------------------------
+Purpose: Define firewall rules for VMs
+
+  $ openstack security group create mysg \
+    --description "My security group"
+
+  $ openstack security group rule create \
+    --protocol icmp --ingress mysg
+
+  $ openstack security group rule create \
+    --protocol tcp --dst-port 22 --ingress mysg
+
+EXPLANATION:
+  - Default security group blocks ALL inbound traffic
+  - We added ICMP rule to allow ping
+  - We added TCP port 22 rule to allow SSH
+  - Egress (outbound) is allowed by default
+  - stateful: True = return traffic automatically allowed
+
+
+6. LAUNCH VM ON CUSTOM NETWORK
+-------------------------------
+Purpose: Test full network stack with our new resources
+
+  $ openstack server create \
+    --flavor m1.nano \
+    --image cirros-0.5.2-x86_64-disk \
+    --network mynetwork \
+    --security-group mysg \
+    --wait myserver2
+
+  Output (key fields):
+  +------------------+--------------------------------------------+
+  | addresses        | mynetwork=192.168.100.209                  |
+  | security_groups  | name='mysg'                                |
+  | status           | ACTIVE                                     |
+  +------------------+--------------------------------------------+
+
+EXPLANATION:
+  - VM got IP 192.168.100.209 from our DHCP pool
+  - Security group mysg is enforcing our firewall rules
+
+
+7. ASSIGN FLOATING IP AND SSH
+------------------------------
+Purpose: Access VM from outside using public IP
+
+  $ openstack floating ip create public
+  | floating_ip_address | 172.24.4.11 |
+
+  $ openstack server add floating ip myserver2 172.24.4.11
+
+  $ openstack server show myserver2 | grep addresses
+  | addresses | mynetwork=172.24.4.11, 192.168.100.209 |
+
+  $ ssh cirros@172.24.4.11
+  $ hostname
+  myserver2
+
+EXPLANATION:
+  - Floating IP 172.24.4.11 mapped to private 192.168.100.209
+  - Full network path verified: VM -> mynetwork -> myroute
+    -> public network -> SSH access
+  - ping 8.8.8.8 from inside VM also works (internet access)
+
+
+8. COMMON PORT OPERATIONS
+--------------------------
+Purpose: Manage network attachment points
+
+  List ports:
+  $ openstack port list
+
+  Show port details:
+  $ openstack port show <port-id>
+
+  Delete a port (must remove from router first):
+  $ openstack router remove subnet <router> <subnet>
+  $ openstack port delete <port-id>
+
+EXPLANATION:
+  - Ports are virtual NICs connecting VMs to networks
+  - Each VM interface = one port
+  - Router interfaces = ports with device_owner=network:router_interface
+  - Cannot delete port directly if owned by router
+
+================================================================
+TROUBLESHOOTING NEUTRON
+================================================================
+
+PROBLEM: VM not getting IP address
+  Check: openstack port list --server <vm-id>
+  Check: Is DHCP enabled on subnet?
+  Check: Is neutron-dhcp-agent running?
+
+PROBLEM: Cannot ping VM
+  Check: Security group has ICMP rule?
+  Check: Floating IP assigned?
+  Check: Router has external gateway set?
+
+PROBLEM: Cannot delete network
+  Error: "There are one or more ports still in use"
+  Fix:   Find and remove ports first
+         openstack port list --network <network-id>
+         Remove router interface first, then delete port
+
+================================================================
+KEY QUESTIONS - NEUTRON
+================================================================
+
+Q: What is the difference between provider and tenant network?
+A: Provider network is created by admin and maps directly to
+   physical network infrastructure (flat/vlan). Tenant network
+   is created by users using overlay technology (geneve/vxlan)
+   for isolation between tenants.
+
+Q: How does a floating IP work?
+A: Neutron creates a NAT rule on the router mapping the public
+   floating IP to the VM's private IP. Incoming traffic to
+   floating IP is redirected to private IP and vice versa.
+
+Q: What is SNAT?
+A: Source Network Address Translation. When enable_snat=true
+   on a router, VMs can initiate outbound connections to
+   internet using the router's public IP as source address.
+
+Q: What is a security group?
+A: A virtual stateful firewall applied at the port level.
+   Rules define allowed traffic. Default: all egress allowed,
+   all ingress blocked. Applied per VM, not per network.
+
+Q: How do you troubleshoot VM with no network connectivity?
+A: 1. Check security group rules (ICMP/SSH allowed?)
+   2. Check floating IP is assigned
+   3. Check router has external gateway
+   4. Check router has subnet interface
+   5. Check neutron-l3-agent / OVN logs
+
+================================================================
+END 
+================================================================
