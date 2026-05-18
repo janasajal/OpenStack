@@ -1,0 +1,225 @@
+================================================================
+KEYSTONE (IDENTITY SERVICE)
+OpenStack Administration Lab Notes
+================================================================
+
+WHAT IS KEYSTONE?
+-----------------
+Keystone is the Identity service of OpenStack. It is the first
+service every OpenStack request touches. It handles:
+  - Authentication (who are you?)
+  - Authorization (what can you do?)
+  - Service catalog (where are the services?)
+
+KEY CONCEPTS:
+  - Domain   : Top level container for projects and users
+  - Project  : Isolated workspace (like a tenant/team)
+  - User     : A person or service that interacts with OpenStack
+  - Role     : Defines what a user can do in a project
+  - Token    : Proof of authentication, valid for 1 hour
+  - Endpoint : URL where a service is available
+
+COMMON ROLES:
+  - admin  : Full control over everything
+  - member : Regular user, can create resources
+  - reader : Read only access
+
+================================================================
+LAB SETUP
+================================================================
+
+ENVIRONMENT SETUP:
+------------------
+Before running any openstack command, load credentials:
+
+  $ source openrc admin admin
+  WARNING: setting legacy OS_TENANT_NAME to support cli tools.
+
+EXPLANATION:
+  - source openrc     : Loads environment variables for CLI
+  - first 'admin'     : Project name to login into
+  - second 'admin'    : Username to login as
+  - Sets OS_AUTH_URL, OS_USERNAME, OS_PASSWORD etc.
+  - Without this, all openstack commands fail
+
+================================================================
+LAB COMMANDS & OUTPUT
+================================================================
+
+1. LIST ALL SERVICES
+--------------------
+Purpose: Verify all OpenStack services are registered in Keystone
+
+  $ openstack service list
+
+  Output:
+  +----------------------------------+-------------+----------------+
+  | ID                               | Name        | Type           |
+  +----------------------------------+-------------+----------------+
+  | 4265636a405647149845b63a1e525d7b | placement   | placement      |
+  | 507d6a48fadd4fe491a6b1f5a73120e4 | swift       | object-store   |
+  | 51cd32efb8e24525987f608856ef7cdf | keystone    | identity       |
+  | 5665886a1f5a474b8ac54350bed4df91 | glance      | image          |
+  | 7170a601ab3b4a3abcb5ef6714033ba1 | nova        | compute        |
+  | 72e485bef46241a9a299147fde2000a7 | cinder      | block-storage  |
+  | 7902ef38b4c04534ae410eaad80be1de | neutron     | network        |
+  | 7bce4f5a056c415ea71754c0491fff42 | cinderv3    | volumev3       |
+  | c8b7d7137fb84cdb936160fe71332e9f | nova_legacy | compute_legacy |
+  +----------------------------------+-------------+----------------+
+
+EXPLANATION:
+  - keystone   : Identity service
+  - nova       : Compute service (VMs)
+  - neutron    : Networking service
+  - glance     : Image service
+  - cinder     : Block storage service
+  - swift      : Object storage service
+  - placement  : Resource tracking service
+
+
+2. LIST ALL PROJECTS
+--------------------
+Purpose: See all projects (tenants) in the cloud
+
+  $ openstack project list
+
+  Output:
+  +----------------------------------+--------------------+
+  | ID                               | Name               |
+  +----------------------------------+--------------------+
+  | 7e9d177f88d6428ebdd7b1fdfcd9c37b | alt_demo           |
+  | 9748464809504f3895cbce22198d9d43 | demo               |
+  | 9b752a19f58c4e9f8e67d0f1fbb1f41f | admin              |
+  | cd719d305ad24b329cf80384076fb2da | invisible_to_admin |
+  | eaa5fe813b694b27813b31858dabd2eb | service            |
+  +----------------------------------+--------------------+
+
+EXPLANATION:
+  - admin              : Main admin project, full cloud control
+  - demo               : Regular user project for testing
+  - service            : Internal project for OpenStack services
+  - alt_demo           : Alternate demo project
+  - invisible_to_admin : Tests visibility/RBAC restrictions
+
+
+3. CREATE A PROJECT
+-------------------
+Purpose: Create an isolated workspace for a team or application
+
+  $ openstack project create --description "My Lab Project" myproject
+
+  Output:
+  +-------------+----------------------------------+
+  | Field       | Value                            |
+  +-------------+----------------------------------+
+  | description | My Lab project                   |
+  | domain_id   | default                          |
+  | enabled     | True                             |
+  | id          | 28f03bac031c458bada479b7ef63f323 |
+  | is_domain   | False                            |
+  | name        | myproject                        |
+  | parent_id   | default                          |
+  +-------------+----------------------------------+
+
+EXPLANATION:
+  - domain_id  : Belongs to the default domain
+  - enabled    : True = project is active
+  - parent_id  : default = top level project
+  - id         : Unique identifier used by all services
+
+
+4. CREATE A USER
+----------------
+Purpose: Create a new user who can log into OpenStack
+
+  $ openstack user create --password secret --email user@myproject.com myuser
+
+  Output:
+  +---------------------+----------------------------------+
+  | Field               | Value                            |
+  +---------------------+----------------------------------+
+  | domain_id           | default                          |
+  | enabled             | True                             |
+  | id                  | 6986c3d215d04183b754a9e28f0356b8 |
+  | name                | myuser                           |
+  | password_expires_at | None                             |
+  +---------------------+----------------------------------+
+
+EXPLANATION:
+  - enabled            : True = user can login
+  - password_expires_at: None = password never expires
+  - domain_id          : Belongs to default domain
+
+
+5. ASSIGN ROLE TO USER
+----------------------
+Purpose: Grant a user access to a project with specific permissions
+
+  $ openstack role add --project myproject --user myuser member
+
+  $ openstack role assignment list --user myuser --project myproject --names
+
+  Output:
+  +--------+----------------+-------+-------------------+--------+--------+-----------+
+  | Role   | User           | Group | Project           | Domain | System | Inherited |
+  +--------+----------------+-------+-------------------+--------+--------+-----------+
+  | member | myuser@Default |       | myproject@Default |        |        | False     |
+  +--------+----------------+-------+-------------------+--------+--------+-----------+
+
+EXPLANATION:
+  - Role      : member = can use resources but not manage project
+  - Inherited : False = applies only to this project
+  - Without a role, user cannot access the project at all
+
+
+6. VERIFY USER LOGIN (TOKEN ISSUE)
+------------------------------------
+Purpose: Confirm a user can authenticate successfully
+
+  $ openstack token issue --os-username myuser --os-password secret \
+    --os-project-name myproject \
+    --os-auth-url http://172.20.128.18/identity
+
+  Output:
+  +------------+----------------------------------------------------------+
+  | Field      | Value                                                    |
+  +------------+----------------------------------------------------------+
+  | expires    | 2026-05-17T14:53:52+0000                                 |
+  | id         | gAAAAABqCchwtnfYdx....(long token string)                 |
+  | project_id | 28f03bac031c458bada479b7ef63f323                         |
+  | user_id    | 6986c3d215d04183b754a9e28f0356b8                         |
+  +------------+----------------------------------------------------------+
+
+EXPLANATION:
+  - id         : The actual token - long encrypted string
+  - expires    : Token valid for 1 hour by default
+  - project_id : Matches our myproject ID
+  - user_id    : Matches our myuser ID
+  - Every API call uses this token for authentication
+
+================================================================
+ QUESTIONS - KEYSTONE
+================================================================
+
+Q: What is a token in OpenStack?
+A: A token is a temporary credential issued by Keystone after
+   successful authentication. It is passed with every API request
+   to prove identity. Default validity is 1 hour.
+
+Q: What is the difference between a project and a domain?
+A: A domain is a top level container for projects and users.
+   A project is an isolated workspace inside a domain where
+   resources like VMs and networks are created.
+
+Q: What happens if Keystone goes down?
+A: No new API requests can be authenticated. Existing VMs
+   continue running but no new operations can be performed.
+   All CLI commands will fail with authentication errors.
+
+Q: What are the default roles in OpenStack?
+A: admin (full control), member (create/use resources),
+   reader (read only access)
+
+================================================================
+END 
+================================================================
