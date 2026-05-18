@@ -1,0 +1,416 @@
+================================================================================
+ LAB SCENARIO 06 — User and Role Access Configuration (RBAC)
+ Topic   : Keystone RBAC Setup with Domains, Users, Groups, Roles,
+           Horizon Access, and Access Audit
+================================================================================
+
+OBJECTIVE
+---------
+Controlled access was required to be configured for new administrators and
+users across Horizon and OpenStack APIs. The setup followed a least-privilege
+model — users were organized under a dedicated domain, assigned roles at the
+appropriate scope (project or domain level), grouped for scalable management,
+and validated at every role level before handover.
+
+--------------------------------------------------------------------------------
+RBAC HIERARCHY REFERENCE
+--------------------------------------------------------------------------------
+
+  DOMAIN LEVEL
+  └── Domain Admin
+      Can manage users and projects within a domain only.
+
+      PROJECT LEVEL
+      └── admin   -> Full control within the project
+          member  -> Create and manage own resources
+          reader  -> Read-only, no create or delete
+
+      SYSTEM LEVEL  (global scope — used sparingly)
+      └── system:admin  -> Full OpenStack control
+          system:reader -> Global read-only
+
+  Rule: Roles are always assigned at the lowest required scope.
+
+--------------------------------------------------------------------------------
+STEP 1 — Existing Roles Verification
+--------------------------------------------------------------------------------
+
+Admin credentials were sourced:
+
+  $ source /etc/openstack/admin-openrc.sh
+
+All available Keystone roles were listed before creating new ones:
+
+  $ openstack role list
+
+  +--------------------------------------+------------------+
+  | ID                                   | Name             |
+  +--------------------------------------+------------------+
+  | role-0001-abcd-1234-5678-000000000001| admin            |
+  | role-0002-abcd-1234-5678-000000000002| member           |
+  | role-0003-abcd-1234-5678-000000000003| reader           |
+  | role-0004-abcd-1234-5678-000000000004| heat_stack_owner |
+  | role-0005-abcd-1234-5678-000000000005| heat_stack_user  |
+  +--------------------------------------+------------------+
+
+The policy enforcement model was confirmed as using scoped tokens:
+
+  $ grep "enforce_scope\|enforce_new_defaults" \
+      /etc/keystone/keystone.conf
+
+  enforce_scope = true
+  enforce_new_defaults = true
+
+--------------------------------------------------------------------------------
+STEP 2 — Domain Creation for the Business Unit
+--------------------------------------------------------------------------------
+
+A dedicated domain was created for the infrastructure administration team:
+
+  $ openstack domain create \
+      --description "Infrastructure Administration Domain" \
+      --enable \
+      infra-domain
+
+  +-------------+--------------------------------------+
+  | Field       | Value                                |
+  +-------------+--------------------------------------+
+  | id          | dom-abcd-1234-5678-efgh-000000000001 |
+  | name        | infra-domain                         |
+  | description | Infrastructure Administration Domain |
+  | enabled     | True                                 |
+  +-------------+--------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 3 — User Creation
+--------------------------------------------------------------------------------
+
+Three users were created with distinct responsibilities:
+
+Senior Infrastructure Admin:
+
+  $ openstack user create \
+      --domain infra-domain \
+      --email infra-admin@company.com \
+      --password 'V@ultG3n#Pass001!' \
+      --description "Senior Infra Administrator" \
+      --enable \
+      infra-admin-01
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | id                  | usr-abcd-0001-1234-5678-000000000001 |
+  | name                | infra-admin-01                       |
+  | domain_id           | dom-abcd-1234-5678-efgh-000000000001 |
+  | email               | infra-admin@company.com              |
+  | enabled             | True                                 |
+  +---------------------+--------------------------------------+
+
+Junior Infra Member:
+
+  $ openstack user create \
+      --domain infra-domain \
+      --email infra-member@company.com \
+      --password 'V@ultG3n#Pass002!' \
+      --description "Junior Infra Member" \
+      --enable \
+      infra-member-01
+
+Read-Only Auditor:
+
+  $ openstack user create \
+      --domain infra-domain \
+      --email infra-auditor@company.com \
+      --password 'V@ultG3n#Pass003!' \
+      --description "Infra Read-Only Auditor" \
+      --enable \
+      infra-auditor-01
+
+All users were verified:
+
+  $ openstack user list --domain infra-domain
+
+  +--------------------------------------+-----------------+
+  | ID                                   | Name            |
+  +--------------------------------------+-----------------+
+  | usr-abcd-0001-1234-5678-000000000001 | infra-admin-01  |
+  | usr-abcd-0002-1234-5678-000000000002 | infra-member-01 |
+  | usr-abcd-0003-1234-5678-000000000003 | infra-auditor-01|
+  +--------------------------------------+-----------------+
+
+--------------------------------------------------------------------------------
+STEP 4 — Project-Scoped Role Assignments
+--------------------------------------------------------------------------------
+
+The admin role was assigned to the senior admin — scoped to infra-project only:
+
+  $ openstack role add \
+      --project infra-project \
+      --user infra-admin-01 \
+      --user-domain infra-domain \
+      admin
+
+The member role was assigned to the junior admin:
+
+  $ openstack role add \
+      --project infra-project \
+      --user infra-member-01 \
+      --user-domain infra-domain \
+      member
+
+The reader role was assigned to the auditor — read-only access only:
+
+  $ openstack role add \
+      --project infra-project \
+      --user infra-auditor-01 \
+      --user-domain infra-domain \
+      reader
+
+All project-scoped role assignments were verified:
+
+  $ openstack role assignment list \
+      --project infra-project \
+      --names
+
+  +--------+----------------------------------+-------+---------------+--------+
+  | Role   | User                             | Group | Project       | System |
+  +--------+----------------------------------+-------+---------------+--------+
+  | admin  | infra-admin-01@infra-domain      |       | infra-project |        |
+  | member | infra-member-01@infra-domain     |       | infra-project |        |
+  | reader | infra-auditor-01@infra-domain    |       | infra-project |        |
+  +--------+----------------------------------+-------+---------------+--------+
+
+--------------------------------------------------------------------------------
+STEP 5 — Domain-Scoped Role for Domain Admin
+--------------------------------------------------------------------------------
+
+The senior admin was granted domain admin rights — scoped to infra-domain only.
+This allows user and project management within the domain without global access:
+
+  $ openstack role add \
+      --domain infra-domain \
+      --user infra-admin-01 \
+      --user-domain infra-domain \
+      admin
+
+  $ openstack role assignment list \
+      --domain infra-domain \
+      --names
+
+  +-------+-----------------------------+-------+--------------+--------+
+  | Role  | User                        | Group | Domain       | System |
+  +-------+-----------------------------+-------+--------------+--------+
+  | admin | infra-admin-01@infra-domain |       | infra-domain |        |
+  +-------+-----------------------------+-------+--------------+--------+
+
+  Permissions granted to domain admin:
+  -> Can create and disable users within infra-domain
+  -> Can create and delete projects within infra-domain
+  -> Can assign roles within infra-domain
+  -> Cannot touch other domains
+  -> Cannot manage compute or network resources globally
+
+--------------------------------------------------------------------------------
+STEP 6 — Group-Based Role Assignment
+--------------------------------------------------------------------------------
+
+A group was created to allow scalable role management. Users are added to
+the group rather than assigned roles individually:
+
+  $ openstack group create \
+      --domain infra-domain \
+      --description "Infrastructure Administrators Group" \
+      infra-admins-group
+
+  +-------------+--------------------------------------+
+  | Field       | Value                                |
+  +-------------+--------------------------------------+
+  | id          | grp-abcd-1234-5678-efgh-000000000001 |
+  | name        | infra-admins-group                   |
+  | domain_id   | dom-abcd-1234-5678-efgh-000000000001 |
+  +-------------+--------------------------------------+
+
+Users were added to the group:
+
+  $ openstack group add user \
+      --group-domain infra-domain \
+      infra-admins-group infra-admin-01
+
+  $ openstack group add user \
+      --group-domain infra-domain \
+      infra-admins-group infra-member-01
+
+The member role was assigned to the group instead of individual users:
+
+  $ openstack role add \
+      --project infra-project \
+      --group infra-admins-group \
+      --group-domain infra-domain \
+      member
+
+Group membership was verified:
+
+  $ openstack group contains user \
+      --group-domain infra-domain \
+      infra-admins-group infra-admin-01
+
+  infra-admin-01 in group infra-admins-group
+
+  $ openstack user list \
+      --group infra-admins-group \
+      --group-domain infra-domain
+
+  +--------------------------------------+-----------------+
+  | ID                                   | Name            |
+  +--------------------------------------+-----------------+
+  | usr-abcd-0001-1234-5678-000000000001 | infra-admin-01  |
+  | usr-abcd-0002-1234-5678-000000000002 | infra-member-01 |
+  +--------------------------------------+-----------------+
+
+--------------------------------------------------------------------------------
+STEP 7 — Horizon Dashboard Configuration Verification
+--------------------------------------------------------------------------------
+
+The Keystone endpoint used by Horizon was confirmed:
+
+  $ grep -E "OPENSTACK_HOST|OPENSTACK_KEYSTONE_URL" \
+      /etc/openstack-dashboard/local_settings
+
+  OPENSTACK_HOST = "keystone.company.local"
+  OPENSTACK_KEYSTONE_URL = "http://keystone.company.local:5000/v3"
+
+Multi-domain support was confirmed enabled in Horizon:
+
+  $ grep "OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT" \
+      /etc/openstack-dashboard/local_settings
+
+  OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True
+
+RBAC policy panel was confirmed enabled:
+
+  $ grep -A10 "OPENSTACK_NEUTRON_NETWORK" \
+      /etc/openstack-dashboard/local_settings
+
+  OPENSTACK_NEUTRON_NETWORK = {
+      'enable_router': True,
+      'enable_quotas': True,
+      'enable_rbac_policy': True,
+      'enable_fip_topology_check': True,
+  }
+
+Horizon was restarted to apply configuration:
+
+  $ sudo systemctl restart httpd
+  $ sudo systemctl status httpd | grep Active
+
+  Active: active (running) since Mon 2026-05-18 07:30:00 IST
+
+--------------------------------------------------------------------------------
+STEP 8 — Role-Level Access Testing
+--------------------------------------------------------------------------------
+
+Admin user token was issued and capabilities were confirmed:
+
+  $ openstack token issue \
+      --os-username infra-admin-01 \
+      --os-user-domain-name infra-domain \
+      --os-password 'V@ultG3n#Pass001!' \
+      --os-project-name infra-project \
+      --os-auth-url http://keystone.company.local:5000/v3
+
+  +------------+----------------------------------+
+  | Field      | Value                            |
+  +------------+----------------------------------+
+  | id         | token-abcd1234efgh5678...        |
+  | project_id | proj-infra-abcd-1234-...         |
+  | user_id    | usr-abcd-0001-1234-...           |
+  | roles      | admin                            |
+  | expires    | 2026-05-19T07:30:00+0000         |
+  +------------+----------------------------------+
+
+Member user was confirmed able to list servers but denied user management:
+
+  $ openstack --os-username infra-member-01 \
+      --os-user-domain-name infra-domain \
+      --os-password 'V@ultG3n#Pass002!' \
+      --os-project-name infra-project \
+      server list
+
+  -> Returned server list successfully (member access confirmed)
+
+  $ openstack --os-username infra-member-01 \
+      --os-user-domain-name infra-domain \
+      --os-password 'V@ultG3n#Pass002!' \
+      --os-project-name infra-project \
+      user list
+
+  HTTP 403 Forbidden: policy does not allow this request
+
+Auditor user was confirmed able to list but denied delete:
+
+  $ openstack --os-username infra-auditor-01 \
+      --os-user-domain-name infra-domain \
+      --os-password 'V@ultG3n#Pass003!' \
+      --os-project-name infra-project \
+      server list
+
+  -> Returned server list successfully (reader access confirmed)
+
+  $ openstack --os-username infra-auditor-01 \
+      --os-user-domain-name infra-domain \
+      --os-password 'V@ultG3n#Pass003!' \
+      --os-project-name infra-project \
+      server delete some-vm
+
+  HTTP 403 Forbidden: policy does not allow this request
+
+--------------------------------------------------------------------------------
+STEP 9 — Audit and Stale Access Review
+--------------------------------------------------------------------------------
+
+A full role assignment audit was performed across all projects:
+
+  $ openstack role assignment list --names
+
+  +--------+----------------------------------+-------+---------------+--------------+
+  | Role   | User                             | Group | Project       | Domain       |
+  +--------+----------------------------------+-------+---------------+--------------+
+  | admin  | infra-admin-01@infra-domain      |       | infra-project |              |
+  | member | infra-member-01@infra-domain     |       | infra-project |              |
+  | reader | infra-auditor-01@infra-domain    |       | infra-project |              |
+  | admin  | infra-admin-01@infra-domain      |       |               | infra-domain |
+  +--------+----------------------------------+-------+---------------+--------------+
+
+Disabled users were checked for stale role assignments:
+
+  $ openstack user list --domain infra-domain | grep False
+
+  -> No disabled users found with active role assignments.
+
+Any disabled user found holding assignments would have roles revoked:
+
+  $ openstack role remove \
+      --project infra-project \
+      --user <disabled-user> \
+      member
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Domain infra-domain created for organizational boundary isolation
+  - Three users created: admin, member, and reader roles respectively
+  - All roles assigned at project scope (least privilege enforced)
+  - Senior admin granted domain-scoped admin (not system-wide)
+  - Group-based role management configured for scalability
+  - Horizon multi-domain support and RBAC panel confirmed enabled
+  - All three role levels tested: admin, member (403 on user list),
+    reader (403 on delete) — permissions validated as expected
+  - Audit performed — no stale or over-privileged assignments found
+
+================================================================================
+END OF LAB — SCENARIO 06
+================================================================================
