@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 05 — Image Upload and Management
+ Image Upload and Management
  Topic   : Custom VM Image Upload to Glance with Integrity Verification,
            Access Control, Versioning, and Lifecycle Management
 ================================================================================
