@@ -1,0 +1,401 @@
+================================================================
+CLI QUICK REFERENCE
+OpenStack Administration Lab Notes
+================================================================
+
+OVERVIEW
+--------
+  - OpenStack CLI advanced usage
+  - Keypair management
+  - Output formatting
+  - Complete CLI cheat sheet
+  - Lab environment details
+
+================================================================
+LAB ENVIRONMENT DETAILS
+================================================================
+
+What we built and used in this lab:
+
+  OpenStack Release  : Zed (unmaintained)
+  OpenStack Client   : 6.0.1
+  Deployment Tool    : DevStack
+  Host OS            : Ubuntu 22.04 LTS (Jammy)
+  Hypervisor         : QEMU (nested inside Hyper-V)
+  Networking Backend : OVN (Open Virtual Network)
+  Storage Backend    : LVM (Logical Volume Manager)
+  Database           : MySQL
+  Message Queue      : RabbitMQ
+  Host IP            : 172.20.128.18
+
+Services running:
+  - Keystone (Identity)
+  - Nova (Compute)
+  - Neutron with OVN (Networking)
+  - Glance (Image)
+  - Cinder (Block Storage)
+  - Swift (Object Storage)
+  - Placement (Resource tracking)
+  - Horizon (Dashboard)
+  - etcd (Coordination)
+
+About DevStack:
+  - Development/learning tool, NOT for production
+  - All services run on a single VM
+  - Production uses: Kolla-Ansible, TripleO, Juju, Fuel
+
+================================================================
+ENVIRONMENT SETUP
+================================================================
+
+Load credentials before any openstack command:
+  $ source openrc admin admin
+
+Load credentials for demo user:
+  $ source openrc demo demo
+
+Check current environment:
+  $ env | grep OS_
+  OS_AUTH_URL=http://172.20.128.18/identity
+  OS_USERNAME=admin
+  OS_PROJECT_NAME=admin
+  OS_PASSWORD=secret
+
+================================================================
+KEYPAIR MANAGEMENT
+================================================================
+
+1. CREATE KEYPAIR
+-----------------
+Purpose: Create SSH key for secure VM access (no passwords)
+
+  $ openstack keypair create mykey > mykey.pem && chmod 600 mykey.pem
+
+  $ openstack keypair list
+
+  Output:
+  +-------+-------------------------------------------------+------+
+  | Name  | Fingerprint                                     | Type |
+  +-------+-------------------------------------------------+------+
+  | mykey | 33:ab:4e:3d:5d:54:03:4c:fb:bd:71:81:c3:00:0c:e5 | ssh  |
+  +-------+-------------------------------------------------+------+
+
+EXPLANATION:
+  - mykey.pem   : Private key saved locally for SSH
+  - Fingerprint : Unique identifier for this keypair
+  - chmod 600   : Required by SSH (private key permission)
+  - Type: ssh   : RSA SSH keypair
+  - In production: NEVER share private key, never lose it
+
+  Launch VM with keypair:
+  $ openstack server create \
+    --flavor m1.nano \
+    --image cirros-0.5.2-x86_64-disk \
+    --network shared \
+    --key-name mykey \
+    --wait myserver3
+
+  SSH using keypair (no password needed):
+  $ ssh -i mykey.pem cirros@<floating-ip>
+
+  Delete keypair:
+  $ openstack keypair delete mykey
+
+
+================================================================
+CLI OUTPUT FORMATTING
+================================================================
+
+2. OUTPUT FORMATS
+-----------------
+Purpose: Get specific information for scripts and automation
+
+  Default table format:
+  $ openstack server list
+
+  JSON format (for scripting):
+  $ openstack server show myserver3 -f json
+
+  YAML format:
+  $ openstack server show myserver3 -f yaml
+
+  Get specific field only:
+  $ openstack server show myserver3 -f value -c status
+  ACTIVE
+
+  Filter table columns:
+  $ openstack server list -c Name -c Status -c Networks
+
+  Output:
+  +-----------+--------+------------------------+
+  | Name      | Status | Networks               |
+  +-----------+--------+------------------------+
+  | myserver3 | ACTIVE | shared=192.168.233.125 |
+  +-----------+--------+------------------------+
+
+
+3. FILTERING AND SEARCHING
+---------------------------
+Purpose: Find specific resources quickly in large environments
+
+  List VMs by status:
+  $ openstack server list --status ACTIVE
+  $ openstack server list --status SHUTOFF
+  $ openstack server list --status ERROR
+
+  List VMs by project:
+  $ openstack server list --project admin
+
+  List VMs by host:
+  $ openstack server list --host myvm
+
+  List with all projects (admin only):
+  $ openstack server list --all-projects
+
+  Search by name pattern:
+  $ openstack server list --name "myserver*"
+
+
+================================================================
+COMPLETE CLI CHEAT SHEET
+================================================================
+
+KEYSTONE - IDENTITY
+-------------------
+  openstack project list
+  openstack project create --description "desc" <name>
+  openstack project delete <name>
+  openstack project show <name>
+
+  openstack user list
+  openstack user create --password <pass> <name>
+  openstack user delete <name>
+  openstack user set --password <newpass> <name>
+  openstack user set --disable <name>
+  openstack user set --enable <name>
+
+  openstack role list
+  openstack role add --project <proj> --user <user> <role>
+  openstack role remove --project <proj> --user <user> <role>
+  openstack role assignment list --user <user> --names
+
+  openstack token issue
+  openstack catalog list
+
+NOVA - COMPUTE
+--------------
+  openstack server list
+  openstack server list --all-projects
+  openstack server list --status ERROR
+
+  openstack server create \
+    --flavor <flavor> \
+    --image <image> \
+    --network <network> \
+    --key-name <key> \
+    --security-group <sg> \
+    --wait <name>
+
+  openstack server show <name>
+  openstack server start <name>
+  openstack server stop <name>
+  openstack server reboot <name>
+  openstack server reboot --hard <name>
+  openstack server delete <name>
+  openstack server set --state active <name>   # reset error state
+
+  openstack server add floating ip <server> <ip>
+  openstack server remove floating ip <server> <ip>
+  openstack server add volume <server> <volume>
+  openstack server remove volume <server> <volume>
+
+  openstack console url show <name>            # VNC console
+  openstack server ssh <name>                  # SSH shortcut
+
+  openstack compute service list
+  openstack hypervisor list
+  openstack hypervisor show <hostname>
+
+  openstack flavor list
+  openstack flavor create --ram 512 --disk 5 --vcpus 1 <name>
+  openstack flavor delete <name>
+
+  openstack keypair list
+  openstack keypair create <name> > key.pem
+  openstack keypair delete <name>
+
+NEUTRON - NETWORKING
+---------------------
+  openstack network list
+  openstack network list --long
+  openstack network create <name>
+  openstack network delete <name>
+  openstack network show <name>
+
+  openstack subnet list
+  openstack subnet create \
+    --network <net> \
+    --subnet-range 192.168.1.0/24 \
+    --gateway 192.168.1.1 \
+    --dns-nameserver 8.8.8.8 <name>
+  openstack subnet delete <name>
+
+  openstack router list
+  openstack router create <name>
+  openstack router set --external-gateway public <router>
+  openstack router add subnet <router> <subnet>
+  openstack router remove subnet <router> <subnet>
+  openstack router delete <name>
+  openstack router show <name>
+
+  openstack floating ip list
+  openstack floating ip create public
+  openstack floating ip delete <ip>
+
+  openstack port list
+  openstack port list --server <vm-id>
+  openstack port show <port-id>
+  openstack port delete <port-id>
+
+  openstack security group list
+  openstack security group create <name>
+  openstack security group delete <name>
+  openstack security group rule list <sg-name>
+  openstack security group rule create \
+    --protocol tcp \
+    --dst-port 22 \
+    --ingress <sg-name>
+  openstack security group rule create \
+    --protocol icmp \
+    --ingress <sg-name>
+
+GLANCE - IMAGE
+--------------
+  openstack image list
+  openstack image show <name>
+  openstack image create \
+    --file <local-file> \
+    --disk-format qcow2 \
+    --container-format bare \
+    --public <name>
+  openstack image delete <name>
+  openstack image set --public <name>
+  openstack image set --private <name>
+
+CINDER - BLOCK STORAGE
+-----------------------
+  openstack volume list
+  openstack volume create --size <gb> <name>
+  openstack volume delete <name>
+  openstack volume show <name>
+  openstack volume set --size <gb> <name>      # extend volume
+
+  openstack volume snapshot list
+  openstack volume snapshot create --volume <vol> <name>
+  openstack volume snapshot delete <name>
+
+  openstack volume service list
+  openstack volume type list
+
+  openstack quota show <project>
+  openstack quota set --instances 20 --cores 40 <project>
+
+================================================================
+================================================================
+
+TOP 20 QUESTIONS & SHORT ANSWERS
+-------------------------------------------
+
+1. What is OpenStack?
+   Open source cloud platform for building private/public clouds.
+   Provides compute, networking, storage as a service.
+
+2. Name core OpenStack components?
+   Nova (compute), Neutron (network), Cinder (block storage),
+   Glance (image), Keystone (identity), Swift (object storage),
+   Heat (orchestration), Horizon (dashboard)
+
+3. What is a tenant/project?
+   Isolated workspace where users create cloud resources.
+   Provides resource isolation between teams/customers.
+
+4. How does Keystone authentication work?
+   User sends credentials to Keystone -> Keystone validates
+   -> Issues token -> Token included in all API requests
+   -> Services validate token with Keystone
+
+5. How does Nova schedule a VM?
+   nova-scheduler uses filters (RAM, disk, CPU, AZ) to
+   eliminate unsuitable hosts, then weights to rank them,
+   picks the best host, nova-compute on that host creates VM.
+
+6. What is the difference between stop and terminate?
+   Stop (SHUTOFF): VM powered off, resources reserved.
+   Delete (terminate): VM removed, all resources released.
+
+7. What is a floating IP?
+   Public IP that can be assigned to any VM. Maps to VM's
+   private IP via NAT on the router. Like AWS Elastic IP.
+
+8. What is a security group?
+   Stateful virtual firewall at port level. Defines allowed
+   traffic. Default: all egress allowed, all ingress blocked.
+
+9. What is the difference between Cinder and Swift?
+   Cinder: block storage, attached to VM as disk (/dev/vdb).
+   Swift: object storage, accessed via HTTP API like S3.
+
+10. What is Nova conductor?
+    Middleman between nova-compute and database. Prevents
+    compute nodes from directly accessing database (security).
+
+11. What is RabbitMQ in OpenStack?
+    Message broker (AMQP). All services communicate async
+    through it. If it dies, entire cloud stops working.
+
+12. What is Neutron OVN?
+    Open Virtual Network - SDN backend for Neutron.
+    Replaced OVS+agents architecture. More scalable.
+
+13. How do you troubleshoot VM in ERROR state?
+    openstack server show <vm> (check fault)
+    journalctl -u devstack@n-cpu (check logs)
+    Try: openstack server reboot --hard <vm>
+    Last resort: delete and recreate
+
+14. What is Heat?
+    Orchestration service. Deploy full infrastructure stacks
+    from YAML templates (HOT format). Like AWS CloudFormation.
+
+15. What is Placement service?
+    Tracks resource inventory and allocations across all
+    compute nodes. Nova-scheduler queries it to find hosts
+    with sufficient resources.
+
+16. What are availability zones?
+    Logical grouping of compute hosts. Used for HA - spread
+    VMs across zones so hardware failure affects only one zone.
+
+17. How do you migrate a VM?
+    Live migration (no downtime):
+    openstack server migrate --live-migration <vm>
+    Cold migration (VM stopped):
+    openstack server migrate <vm>
+
+18. What is a provider network?
+    Network mapped directly to physical network by admin.
+    Uses flat or VLAN type. VMs get IPs from physical range.
+
+19. How do quotas work?
+    Per-project limits on resources (VMs, RAM, volumes etc.)
+    Admin sets with: openstack quota set --instances 20 <proj>
+    Exceeding quota returns HTTP 403 Forbidden.
+
+20. What databases does OpenStack use?
+    MySQL/MariaDB for all services.
+    nova_api, nova_cell1, neutron, cinder, keystone,
+    glance, placement are separate databases.
+
+================================================================
+END 
+================================================================
