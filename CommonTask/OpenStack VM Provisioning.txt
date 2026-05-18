@@ -1,0 +1,244 @@
+================================================================================
+ LAB SCENARIO 01 — OpenStack VM Provisioning
+ Topic   : Virtual Machine Provisioning with Flavor, Network,
+           Security Group, and Storage Configuration
+ 
+================================================================================
+
+OBJECTIVE
+---------
+A new virtual machine was required to be provisioned with specific compute
+flavor, network attachment, security group, key pair, and additional block
+storage. All components were verified before and after provisioning to ensure
+the instance was fully operational.
+
+--------------------------------------------------------------------------------
+STEP 1 — Pre-Requisite Verification
+--------------------------------------------------------------------------------
+
+Before provisioning was initiated, all required building blocks were confirmed
+to be present in the environment — flavor, image, network, security group,
+and key pair.
+
+Available flavors were listed:
+
+  $ openstack flavor list
+
+  +--------------------------------------+-----------+-------+------+-------+
+  | ID                                   | Name      |   RAM | Disk | VCPUs |
+  +--------------------------------------+-----------+-------+------+-------+
+  | 1a2b3c4d-0001-0001-0001-000000000001 | m1.small  |  2048 |   20 |     2 |
+  | 1a2b3c4d-0002-0002-0002-000000000002 | m1.medium |  4096 |   40 |     4 |
+  | 1a2b3c4d-0003-0003-0003-000000000003 | m1.large  |  8192 |   80 |     8 |
+  +--------------------------------------+-----------+-------+------+-------+
+
+Available images were verified:
+
+  $ openstack image list
+
+  +--------------------------------------+-----------------+--------+
+  | ID                                   | Name            | Status |
+  +--------------------------------------+-----------------+--------+
+  | aabb1122-0001-0001-0001-aabbcc001122 | RHEL-8.6-x86_64 | active |
+  | aabb1122-0002-0002-0002-aabbcc002233 | RHEL-9.2-x86_64 | active |
+  +--------------------------------------+-----------------+--------+
+
+Available networks were confirmed:
+
+  $ openstack network list
+
+  +--------------------------------------+------------------+-------------------+
+  | ID                                   | Name             | Subnets           |
+  +--------------------------------------+------------------+-------------------+
+  | net-0001-0001-0001-0001-000000000001 | app-internal-net | sub-0001-...-0001 |
+  | net-0002-0002-0002-0002-000000000002 | db-internal-net  | sub-0002-...-0002 |
+  +--------------------------------------+------------------+-------------------+
+
+Security groups were reviewed:
+
+  $ openstack security group list
+
+  +-------------------------------------+------------+---------------------------+
+  | ID                                  | Name       | Description               |
+  +-------------------------------------+------------+---------------------------+
+  | sg-0001-0001-0001-0001-000000000001 | sg-web-app | Allow HTTP/HTTPS and SSH   |
+  | sg-0002-0002-0002-0002-000000000002 | sg-db-tier | Allow DB port 5432 and SSH|
+  +-------------------------------------+------------+---------------------------+
+
+Key pair existence was verified:
+
+  $ openstack keypair list
+
+  +------------------+-------------------------------------------------+
+  | Name             | Fingerprint                                     |
+  +------------------+-------------------------------------------------+
+  | app-team-keypair | ab:cd:ef:12:34:56:78:90:ab:cd:ef:12:34:56:78:90 |
+  +------------------+-------------------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 2 — Instance Creation
+--------------------------------------------------------------------------------
+
+The instance was created using all verified parameters in a single command.
+The --wait flag was used to hold output until the build process completed.
+
+  $ openstack server create \
+      --flavor m1.medium \
+      --image RHEL-8.6-x86_64 \
+      --network app-internal-net \
+      --security-group sg-web-app \
+      --key-name app-team-keypair \
+      --availability-zone nova:compute-node-01 \
+      --wait \
+      app-vm-01
+
+  +-----------------------------+--------------------------------------------------+
+  | Field                       | Value                                            |
+  +-----------------------------+--------------------------------------------------+
+  | id                          | vm-1234-5678-abcd-efgh-000000000001              |
+  | name                        | app-vm-01                                        |
+  | status                      | BUILD                                            |
+  | flavor                      | m1.medium                                        |
+  | image                       | RHEL-8.6-x86_64                                  |
+  | networks                    | app-internal-net=192.168.10.15                   |
+  | security_groups             | sg-web-app                                       |
+  | OS-EXT-AZ:availability_zone | nova:compute-node-01                             |
+  +-----------------------------+--------------------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 3 — Additional Cinder Volume Creation and Attachment
+--------------------------------------------------------------------------------
+
+A 100GB block storage volume was created on the ceph-ssd backend and attached
+to the instance as a secondary data disk.
+
+The volume was created:
+
+  $ openstack volume create \
+      --size 100 \
+      --type ceph-ssd \
+      --availability-zone nova \
+      app-vm-01-datadisk
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | id                  | vol-abcd-1234-5678-efgh-000000000001 |
+  | name                | app-vm-01-datadisk                   |
+  | size                | 100                                  |
+  | status              | available                            |
+  | type                | ceph-ssd                             |
+  +---------------------+--------------------------------------+
+
+The volume was attached to the instance:
+
+  $ openstack server add volume app-vm-01 app-vm-01-datadisk --device /dev/vdb
+
+  Volume app-vm-01-datadisk is being attached to server app-vm-01
+
+--------------------------------------------------------------------------------
+STEP 4 — Floating IP Allocation and Association
+--------------------------------------------------------------------------------
+
+A floating IP was allocated from the external network pool and associated
+with the instance to enable external SSH access.
+
+  $ openstack floating ip create external-net
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | floating_ip_address | 10.50.20.101                         |
+  | id                  | fip-0001-0001-0001-0001-000000000001 |
+  | status              | DOWN                                 |
+  +---------------------+--------------------------------------+
+
+  $ openstack server add floating ip app-vm-01 10.50.20.101
+
+The floating IP association was confirmed:
+
+  $ openstack server show app-vm-01 | grep addresses
+
+  | addresses | app-internal-net=192.168.10.15, 10.50.20.101 |
+
+--------------------------------------------------------------------------------
+STEP 5 — Instance Validation
+--------------------------------------------------------------------------------
+
+The instance status was confirmed to be ACTIVE with no pending task state:
+
+  $ openstack server show app-vm-01
+
+  +-----------------------------+----------------------------------------------+
+  | Field                       | Value                                        |
+  +-----------------------------+----------------------------------------------+
+  | id                          | vm-1234-5678-abcd-efgh-000000000001          |
+  | name                        | app-vm-01                                    |
+  | status                      | ACTIVE                                       |
+  | power_state                 | Running                                      |
+  | flavor                      | m1.medium                                    |
+  | image                       | RHEL-8.6-x86_64                              |
+  | networks                    | app-internal-net=192.168.10.15, 10.50.20.101 |
+  | security_groups             | sg-web-app                                   |
+  | OS-EXT-AZ:availability_zone | nova:compute-node-01                         |
+  | OS-EXT-STS:vm_state         | active                                       |
+  | OS-EXT-STS:task_state       | None                                         |
+  +-----------------------------+----------------------------------------------+
+
+The console log was reviewed to confirm cloud-init completion:
+
+  $ openstack console log show app-vm-01 | tail -10
+
+  [  OK  ] Started OpenSSH server daemon.
+  [  OK  ] Reached target Multi-User System.
+  Cloud-init v. 23.1 finished at Mon, 18 May 2026 06:30:12 +0000.
+
+SSH connectivity was tested:
+
+  $ ssh -i ~/.ssh/app-team-keypair.pem cloud-user@10.50.20.101
+
+  [cloud-user@app-vm-01 ~]$ hostname
+  app-vm-01
+
+The attached Cinder volume was confirmed visible inside the OS:
+
+  [cloud-user@app-vm-01 ~]$ lsblk
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vda    252:0    0   40G  0 disk
+  └─vda1 252:1    0   40G  0 part /
+  vdb    252:16   0  100G  0 disk          <- Cinder data volume attached
+
+--------------------------------------------------------------------------------
+STEP 6 — Security Group Rule Verification
+--------------------------------------------------------------------------------
+
+The security group was reviewed to confirm only required ports were permitted:
+
+  $ openstack security group rule list sg-web-app
+
+  +--------------------------------------+----------+------------+------------+---------+
+  | ID                                   | Protocol | Port Range | Remote IP  | Dir     |
+  +--------------------------------------+----------+------------+------------+---------+
+  | rule-0001-0001-0001-0001-000000000001| tcp      | 22:22      | 0.0.0.0/0  | ingress |
+  | rule-0002-0002-0002-0002-000000000002| tcp      | 80:80      | 0.0.0.0/0  | ingress |
+  | rule-0003-0003-0003-0003-000000000003| tcp      | 443:443    | 0.0.0.0/0  | ingress |
+  +--------------------------------------+----------+------------+------------+---------+
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Instance app-vm-01 was provisioned in ACTIVE state
+  - Flavor m1.medium (4 vCPU / 4GB RAM / 40GB disk) was applied
+  - Network interface assigned IP 192.168.10.15 via DHCP
+  - Floating IP 10.50.20.101 was associated successfully
+  - Cinder volume (100GB ceph-ssd) was attached as /dev/vdb
+  - SSH access via key pair was confirmed operational
+  - Security group permitted only ports 22, 80, 443
+
+================================================================================
+END OF LAB — SCENARIO 01
+================================================================================
