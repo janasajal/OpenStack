@@ -1,5 +1,5 @@
-================================================================================
- LAB SCENARIO 09 — Load Balancer as a Service (LBaaS) with Octavia
+===============================================================================
+Load Balancer as a Service (LBaaS) with Octavia
  Topic   : Production HA Load Balancer Configuration with Listener,
            Pool, Health Monitor, Floating IP, and Failover Testing
 ================================================================================
@@ -519,5 +519,5 @@ The following was confirmed upon completion:
   - Amphora ACTIVE_STANDBY failover tested — no service interruption observed
 
 ================================================================================
-END OF LAB — SCENARIO 09
+END 
 ================================================================================
