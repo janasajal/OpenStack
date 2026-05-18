@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 08 — Resource Quota Increase
+ Resource Quota Increase
  Topic   : Quota Increase Validation — Utilization, Infrastructure
            Headroom, Over-Commit Analysis, and Controlled Application
 ================================================================================
@@ -386,5 +386,5 @@ The following was confirmed upon completion:
   - Audit log entry recorded with ticket reference CHG0042891
 
 ================================================================================
-END OF LAB — SCENARIO 08
+END
 ================================================================================
