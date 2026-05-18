@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 06 — User and Role Access Configuration (RBAC)
+ User and Role Access Configuration (RBAC)
  Topic   : Keystone RBAC Setup with Domains, Users, Groups, Roles,
            Horizon Access, and Access Audit
 ================================================================================
@@ -412,5 +412,5 @@ The following was confirmed upon completion:
   - Audit performed — no stale or over-privileged assignments found
 
 ================================================================================
-END OF LAB — SCENARIO 06
+END
 ================================================================================
