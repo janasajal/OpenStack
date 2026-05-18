@@ -1,0 +1,415 @@
+================================================================================
+ LAB SCENARIO 04 — Network Configuration
+ Topic   : Tenant Network, Subnet, Router, Floating IP, and
+           External Connectivity Setup
+================================================================================
+
+OBJECTIVE
+---------
+A complete network topology was required to be built for a tenant project.
+This included an external provider network (admin-managed), a tenant private
+network with DHCP and DNS, a router to connect both layers, security groups
+with least-privilege rules, VM deployment on the tenant network, floating IP
+association for external access, and full end-to-end connectivity validation.
+
+--------------------------------------------------------------------------------
+NETWORK TOPOLOGY (TARGET STATE)
+--------------------------------------------------------------------------------
+
+  Internet / Corporate Network
+            |
+      [External Network]
+      external-net (10.50.0.0/24)
+            |
+      [Router: tenant-router-01]
+      External IP: 10.50.0.25
+            |
+      [Tenant Private Network]
+      tenant-internal-net (192.168.100.0/24)
+         |              |
+    [VM-App-01]     [VM-App-02]
+    192.168.100.11  192.168.100.12
+    FIP: 10.50.0.101
+
+--------------------------------------------------------------------------------
+STEP 1 — External Network Verification / Creation (Admin Task)
+--------------------------------------------------------------------------------
+
+Admin credentials were sourced:
+
+  $ source /etc/openstack/admin-openrc.sh
+
+The external network was checked for prior existence:
+
+  $ openstack network list --external
+
+  +--------------------------------------+--------------+--------------------------------------+
+  | ID                                   | Name         | Subnets                              |
+  +--------------------------------------+--------------+--------------------------------------+
+  | ext-net-abcd-1234-5678-000000000001  | external-net | ext-sub-abcd-1234-5678-000000000001  |
+  +--------------------------------------+--------------+--------------------------------------+
+
+As the external network was not present, it was created as a VLAN provider
+network mapped to the physical network:
+
+  $ openstack network create \
+      --provider-network-type vlan \
+      --provider-physical-network physnet1 \
+      --provider-segment 100 \
+      --external \
+      --share \
+      external-net
+
+  +---------------------------+--------------------------------------+
+  | Field                     | Value                                |
+  +---------------------------+--------------------------------------+
+  | id                        | ext-net-abcd-1234-5678-000000000001  |
+  | name                      | external-net                         |
+  | router:external           | True                                 |
+  | provider:network_type     | vlan                                 |
+  | provider:physical_network | physnet1                             |
+  | provider:segmentation_id  | 100                                  |
+  | shared                    | True                                 |
+  +---------------------------+--------------------------------------+
+
+An external subnet was created with no DHCP (floating IPs are statically
+managed by Neutron):
+
+  $ openstack subnet create \
+      --network external-net \
+      --subnet-range 10.50.0.0/24 \
+      --gateway 10.50.0.1 \
+      --allocation-pool start=10.50.0.100,end=10.50.0.200 \
+      --no-dhcp \
+      external-subnet-01
+
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | id                | ext-sub-abcd-1234-5678-000000000001  |
+  | name              | external-subnet-01                   |
+  | cidr              | 10.50.0.0/24                         |
+  | gateway_ip        | 10.50.0.1                            |
+  | allocation_pools  | 10.50.0.100-10.50.0.200              |
+  | enable_dhcp       | False                                |
+  +-------------------+--------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 2 — Tenant Private Network Creation
+--------------------------------------------------------------------------------
+
+Tenant credentials were sourced:
+
+  $ source /etc/openstack/tenant-openrc.sh
+
+A private internal network was created. VXLAN segmentation was automatically
+assigned by Neutron, providing layer-2 isolation from other tenants:
+
+  $ openstack network create \
+      --internal \
+      --description "App Team Private Network" \
+      tenant-internal-net
+
+  +---------------------------+--------------------------------------+
+  | Field                     | Value                                |
+  +---------------------------+--------------------------------------+
+  | id                        | net-abcd-1234-5678-efgh-000000000001 |
+  | name                      | tenant-internal-net                  |
+  | status                    | ACTIVE                               |
+  | router:external           | False                                |
+  | provider:network_type     | vxlan                                |
+  | provider:segmentation_id  | 5432                                 |
+  | shared                    | False                                |
+  +---------------------------+--------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 3 — Subnet Creation with DHCP and DNS
+--------------------------------------------------------------------------------
+
+A subnet was created with DHCP enabled, a dedicated CIDR, and DNS resolvers
+configured:
+
+  $ openstack subnet create \
+      --network tenant-internal-net \
+      --subnet-range 192.168.100.0/24 \
+      --gateway 192.168.100.1 \
+      --dns-nameserver 8.8.8.8 \
+      --dns-nameserver 8.8.4.4 \
+      --allocation-pool start=192.168.100.10,end=192.168.100.250 \
+      --dhcp \
+      tenant-subnet-01
+
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | id                | sub-abcd-1234-5678-efgh-000000000001 |
+  | name              | tenant-subnet-01                     |
+  | cidr              | 192.168.100.0/24                     |
+  | gateway_ip        | 192.168.100.1                        |
+  | allocation_pools  | 192.168.100.10-192.168.100.250       |
+  | dns_nameservers   | 8.8.4.4, 8.8.8.8                     |
+  | enable_dhcp       | True                                 |
+  +-------------------+--------------------------------------+
+
+The DHCP agent serving this subnet was confirmed as alive:
+
+  $ openstack dhcp agent list --network tenant-internal-net
+
+  +------------------------------------+------------+------------------+-------+-------+
+  | ID                                 | Agent Type | Host             | Alive | State |
+  +------------------------------------+------------+------------------+-------+-------+
+  | dhcp-abcd-1234-5678-efgh-000000001 | DHCP agent | network-node-01  | :-)   | UP    |
+  +------------------------------------+------------+------------------+-------+-------+
+
+--------------------------------------------------------------------------------
+STEP 4 — Router Creation and Network Stitching
+--------------------------------------------------------------------------------
+
+A router was created to bridge the tenant private network and the external
+network:
+
+  $ openstack router create \
+      --description "App Team Tenant Router" \
+      tenant-router-01
+
+  +-------------+--------------------------------------+
+  | Field       | Value                                |
+  +-------------+--------------------------------------+
+  | id          | rtr-abcd-1234-5678-efgh-000000000001 |
+  | name        | tenant-router-01                     |
+  | status      | ACTIVE                               |
+  | admin_state | UP                                   |
+  +-------------+--------------------------------------+
+
+The external gateway was set, enabling NAT and floating IP routing:
+
+  $ openstack router set \
+      --external-gateway external-net \
+      tenant-router-01
+
+The external gateway assignment was confirmed:
+
+  $ openstack router show tenant-router-01 | grep -A3 external_gateway
+
+  | external_gateway_info | {"network_id": "ext-net-abcd-...",
+  |                       |  "external_fixed_ips": [
+  |                       |  {"ip_address": "10.50.0.25",
+  |                       |   "subnet_id": "ext-sub-abcd-..."}]}
+
+The internal subnet was attached to the router as an interface:
+
+  $ openstack router add subnet \
+      tenant-router-01 \
+      tenant-subnet-01
+
+All router ports were verified:
+
+  $ openstack port list --router tenant-router-01
+
+  +--------------------------------------+-----------------+-------------------+-------------------------------+
+  | ID                                   | Name            | MAC Address       | Fixed IPs                     |
+  +--------------------------------------+-----------------+-------------------+-------------------------------+
+  | port-abcd-0001-0001-0001-000000000001| router-gw-port  | fa:16:3e:aa:bb:01 | 10.50.0.25 (external-subnet)  |
+  | port-abcd-0002-0002-0002-000000000002| router-int-port | fa:16:3e:aa:bb:02 | 192.168.100.1 (tenant-subnet) |
+  +--------------------------------------+-----------------+-------------------+-------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 5 — Security Group Configuration
+--------------------------------------------------------------------------------
+
+A dedicated security group was created for the application tier:
+
+  $ openstack security group create \
+      --description "App Tier - HTTP HTTPS SSH" \
+      sg-app-tier
+
+SSH access was restricted to corporate network range only:
+
+  $ openstack security group rule create \
+      --protocol tcp --dst-port 22 \
+      --remote-ip 10.0.0.0/8 --ingress \
+      sg-app-tier
+
+HTTP and HTTPS were permitted from any source:
+
+  $ openstack security group rule create \
+      --protocol tcp --dst-port 80 \
+      --remote-ip 0.0.0.0/0 --ingress \
+      sg-app-tier
+
+  $ openstack security group rule create \
+      --protocol tcp --dst-port 443 \
+      --remote-ip 0.0.0.0/0 --ingress \
+      sg-app-tier
+
+ICMP was permitted for ping and monitoring:
+
+  $ openstack security group rule create \
+      --protocol icmp \
+      --remote-ip 0.0.0.0/0 --ingress \
+      sg-app-tier
+
+All rules were verified:
+
+  $ openstack security group rule list sg-app-tier
+
+  +--------------------+----------+------------+-------------------+---------+
+  | ID                 | Protocol | Port Range | Remote IP         | Dir     |
+  +--------------------+----------+------------+-------------------+---------+
+  | rule-abcd-0001-... | tcp      | 22:22      | 10.0.0.0/8        | ingress |
+  | rule-abcd-0002-... | tcp      | 80:80      | 0.0.0.0/0         | ingress |
+  | rule-abcd-0003-... | tcp      | 443:443    | 0.0.0.0/0         | ingress |
+  | rule-abcd-0004-... | icmp     | None       | 0.0.0.0/0         | ingress |
+  | rule-abcd-0005-... | None     | None       | 0.0.0.0/0         | egress  |
+  +--------------------+----------+------------+-------------------+---------+
+
+--------------------------------------------------------------------------------
+STEP 6 — VM Deployment on Tenant Network
+--------------------------------------------------------------------------------
+
+Two application VMs were launched on the tenant network simultaneously:
+
+  $ openstack server create \
+      --flavor m1.medium \
+      --image RHEL-8.6-x86_64 \
+      --network tenant-internal-net \
+      --security-group sg-app-tier \
+      --key-name app-team-keypair \
+      --min 2 --max 2 \
+      --wait \
+      app-vm
+
+  $ openstack server list
+
+  +--------------------------------------+----------+--------+-----------------------------------+
+  | ID                                   | Name     | Status | Networks                          |
+  +--------------------------------------+----------+--------+-----------------------------------+
+  | vm-abcd-0001-0001-0001-000000000001  | app-vm-1 | ACTIVE | tenant-internal-net=192.168.100.11|
+  | vm-abcd-0002-0002-0002-000000000002  | app-vm-2 | ACTIVE | tenant-internal-net=192.168.100.12|
+  +--------------------------------------+----------+--------+-----------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 7 — Floating IP Allocation and Association
+--------------------------------------------------------------------------------
+
+A floating IP was allocated from the external pool:
+
+  $ openstack floating ip create external-net
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | id                  | fip-abcd-0001-0001-0001-000000000001 |
+  | floating_ip_address | 10.50.0.101                          |
+  | status              | DOWN                                 |
+  +---------------------+--------------------------------------+
+
+The floating IP was associated to app-vm-1 only (the bastion-accessible VM):
+
+  $ openstack server add floating ip app-vm-1 10.50.0.101
+
+The association and status were verified:
+
+  $ openstack server show app-vm-1 | grep addresses
+
+  | addresses | tenant-internal-net=192.168.100.11, 10.50.0.101 |
+
+  $ openstack floating ip show 10.50.0.101
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | floating_ip_address | 10.50.0.101                          |
+  | fixed_ip_address    | 192.168.100.11                       |
+  | status              | ACTIVE                               |
+  | router_id           | rtr-abcd-1234-5678-efgh-000000000001 |
+  +---------------------+--------------------------------------+
+
+--------------------------------------------------------------------------------
+STEP 8 — End-to-End Connectivity Validation
+--------------------------------------------------------------------------------
+
+Floating IP was pinged from the external bastion:
+
+  $ ping -c3 10.50.0.101
+
+  PING 10.50.0.101: 56 data bytes
+  64 bytes from 10.50.0.101: icmp_seq=0 ttl=62 time=1.23 ms
+  64 bytes from 10.50.0.101: icmp_seq=1 ttl=62 time=1.18 ms
+  64 bytes from 10.50.0.101: icmp_seq=2 ttl=62 time=1.21 ms
+
+SSH connectivity via floating IP was confirmed:
+
+  $ ssh -i ~/.ssh/app-team-keypair.pem cloud-user@10.50.0.101
+
+  [cloud-user@app-vm-1 ~]$ hostname
+  app-vm-1
+
+VM-to-VM internal communication was verified:
+
+  [cloud-user@app-vm-1 ~]$ ping -c3 192.168.100.12
+
+  PING 192.168.100.12: 56 data bytes
+  64 bytes from 192.168.100.12: icmp_seq=0 ttl=64 time=0.45 ms
+  64 bytes from 192.168.100.12: icmp_seq=1 ttl=64 time=0.43 ms
+
+Internet reachability via router NAT was tested:
+
+  [cloud-user@app-vm-1 ~]$ curl -s -o /dev/null -w "%{http_code}" \
+      http://example.com
+  200
+
+DNS resolution was confirmed:
+
+  [cloud-user@app-vm-1 ~]$ nslookup google.com
+
+  Server:   8.8.8.8
+  Address:  8.8.8.8#53
+  Non-authoritative answer:
+  Name:     google.com
+  Address:  142.250.190.46
+
+The routing table inside the VM was reviewed:
+
+  [cloud-user@app-vm-1 ~]$ ip route show
+
+  default via 192.168.100.1 dev eth0 proto dhcp
+  192.168.100.0/24 dev eth0 proto kernel scope link src 192.168.100.11
+
+--------------------------------------------------------------------------------
+STEP 9 — Neutron Agent Health Verification
+--------------------------------------------------------------------------------
+
+All Neutron agents were confirmed healthy:
+
+  $ openstack network agent list
+
+  +--------------------+--------------------+-----------------+-------+-------+
+  | Agent Type         | Agent Type         | Host            | Alive | State |
+  +--------------------+--------------------+-----------------+-------+-------+
+  | agent-abcd-0001-...| Open vSwitch agent | compute-node-01 | :-)   | UP    |
+  | agent-abcd-0002-...| Open vSwitch agent | compute-node-02 | :-)   | UP    |
+  | agent-abcd-0003-...| L3 agent           | network-node-01 | :-)   | UP    |
+  | agent-abcd-0004-...| DHCP agent         | network-node-01 | :-)   | UP    |
+  | agent-abcd-0005-...| Metadata agent     | network-node-01 | :-)   | UP    |
+  +--------------------+--------------------+-----------------+-------+-------+
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - External provider network (VLAN 100) created and verified
+  - Tenant private network created with VXLAN isolation
+  - Subnet 192.168.100.0/24 configured with DHCP and DNS (8.8.8.8)
+  - Router connected external-net (10.50.0.25) to tenant-subnet
+  - Security group configured with least-privilege rules
+  - Two VMs deployed: 192.168.100.11 and 192.168.100.12
+  - Floating IP 10.50.0.101 associated to app-vm-1
+  - SSH, ping, internet, and DNS connectivity all validated
+  - All Neutron agents confirmed alive
+
+================================================================================
+END OF LAB — SCENARIO 04
+================================================================================
