@@ -403,5 +403,5 @@ The following was confirmed upon completion:
   - Backup inventory audited — no orphaned or expired backups remaining
 
 ================================================================================
-END OF LAB — SCENARIO 07
+END 
 ================================================================================
