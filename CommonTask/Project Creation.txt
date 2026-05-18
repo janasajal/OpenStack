@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 02 — Tenant / Project Creation
+ Tenant / Project Creation
  Topic   : New Business Unit Onboarding with Project, Users, Quotas,
            Roles, and Isolated Networking
 
@@ -356,5 +356,5 @@ The following was confirmed upon completion:
   - User authentication via scoped token confirmed
 
 ================================================================================
-END OF LAB — SCENARIO 02
+END 
 ================================================================================
