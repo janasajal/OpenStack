@@ -1,0 +1,350 @@
+================================================================
+OPERATIONS & TROUBLESHOOTING
+OpenStack Administration Lab Notes
+================================================================
+
+OVERVIEW
+--------
+Day 5 covers real-world admin operations:
+  - Service health monitoring
+  - Reading and interpreting logs
+  - Quota management
+  - Database administration
+  - Common troubleshooting scenarios
+  - RabbitMQ and MySQL health checks
+
+This is the most important day for interviews. Interviewers
+always ask troubleshooting questions.
+
+================================================================
+LAB SETUP AFTER REBOOT
+================================================================
+
+IMPORTANT: After every VM reboot, run this first:
+
+  Problem: DevStack hardcodes HOST_IP in all service configs.
+           If DHCP assigns a new IP after reboot, all services
+           fail because they try to bind to the old IP.
+
+  Fix: Assign old IP to loopback interface:
+  $ sudo ip addr add 172.20.128.18/32 dev lo
+
+  Then restart etcd if needed:
+  $ sudo systemctl restart devstack@etcd.service
+
+  Root cause explained:
+  - DevStack hardcoded 172.20.128.18 across all configs
+  - After reboot DHCP gave new IP 172.18.200.135
+  - etcd tried to bind to 172.20.128.18 which didn't exist
+  - etcd crashed -> all other services failed
+  - Fix: Make old IP available on loopback so services bind
+
+================================================================
+LAB COMMANDS & OUTPUT
+================================================================
+
+1. CHECK ALL SERVICE STATUS
+----------------------------
+Purpose: Get overview of all OpenStack services health
+
+  $ sudo systemctl list-units | grep devstack
+
+  Output (abbreviated):
+  devstack@c-api.service     loaded active running  Cinder API
+  devstack@c-sch.service     loaded active running  Cinder Scheduler
+  devstack@c-vol.service     loaded active running  Cinder Volume
+  devstack@etcd.service      loaded active running  etcd
+  devstack@g-api.service     loaded active running  Glance API
+  devstack@keystone.service  loaded active running  Keystone
+  devstack@n-api.service     loaded active running  Nova API
+  devstack@n-cpu.service     loaded active running  Nova Compute
+  devstack@n-sch.service     loaded active running  Nova Scheduler
+  devstack@q-svc.service     loaded active running  Neutron
+  devstack@s-proxy.service   loaded active running  Swift Proxy
+
+SERVICE NAME REFERENCE:
+  devstack@keystone     = Keystone (Identity)
+  devstack@n-api        = Nova API
+  devstack@n-cpu        = Nova Compute
+  devstack@n-cond       = Nova Conductor
+  devstack@n-sch        = Nova Scheduler
+  devstack@n-novnc      = Nova VNC Console
+  devstack@q-svc        = Neutron (Networking)
+  devstack@g-api        = Glance (Image)
+  devstack@c-api        = Cinder API
+  devstack@c-vol        = Cinder Volume
+  devstack@c-sch        = Cinder Scheduler
+  devstack@s-proxy      = Swift Proxy
+  devstack@placement-api= Placement API
+  devstack@etcd         = etcd (coordination)
+
+
+2. READING NOVA API LOGS
+------------------------
+Purpose: Understand API request logs for troubleshooting
+
+  $ sudo journalctl -u devstack@n-api.service \
+    --no-pager | tail -20
+
+  Sample output:
+  INFO nova.api.openstack.requestlog [None req-e4c4d68f admin admin]
+  172.20.128.18 "GET /compute/v2.1/os-services"
+  status: 200 len: 964 microversion: 2.69 time: 0.181897
+
+EXPLANATION:
+  - INFO              : Log level (DEBUG/INFO/WARNING/ERROR)
+  - nova.api          : Which Nova component logged this
+  - req-e4c4d68f      : Unique request ID for tracing
+  - admin admin       : User and project making request
+  - GET /compute/v2.1 : HTTP method and API endpoint
+  - status: 200       : HTTP response code (200=success)
+  - time: 0.181897    : Request duration in seconds
+
+
+3. READING NOVA COMPUTE LOGS
+-----------------------------
+Purpose: Debug VM launch failures and hypervisor issues
+
+  $ sudo journalctl -u devstack@n-cpu.service \
+    --no-pager | tail -20
+
+  Sample output (error):
+  ERROR oslo.messaging._drivers.impl_rabbit [None]
+  Connection failed: timed out (retrying in 31.0 seconds):
+  TimeoutError: timed out
+
+EXPLANATION:
+  - This error means nova-compute lost connection to RabbitMQ
+  - Cause: RabbitMQ was not ready when nova-compute started
+  - Fix: sudo systemctl restart rabbitmq-server
+         sudo systemctl restart devstack@n-cpu.service
+  - oslo.messaging = OpenStack messaging library using RabbitMQ
+
+  Filter only errors:
+  $ sudo journalctl -u devstack@n-cpu.service \
+    --no-pager | grep -i error | tail -20
+
+
+4. READING NEUTRON LOGS
+------------------------
+Purpose: Debug networking issues, port failures
+
+  $ sudo journalctl -u devstack@q-svc.service \
+    --no-pager | tail -20
+
+  Sample output:
+  DEBUG futurist.periodics [-] Submitting periodic callback
+  'neutron.plugins.ml2.drivers.ovn.mech_driver.ovsdb.
+  maintenance.HashRingHealthCheckPeriodics.touch_hash_ring_nodes'
+
+EXPLANATION:
+  - neutron-server         : Main Neutron service process
+  - futurist.periodics     : Background scheduled tasks
+  - HashRingHealthCheck    : OVN checking cluster node health
+  - ml2.drivers.ovn        : Using OVN as networking backend
+  - This is normal periodic activity, not an error
+
+
+5. QUOTA MANAGEMENT
+-------------------
+Purpose: Control resource limits per project
+
+  View current quotas:
+  $ openstack quota show admin
+
+  Output (key fields):
+  +--------------+-------+
+  | instances    | 10    |
+  | cores        | 20    |
+  | ram          | 51200 |
+  | volumes      | 10    |
+  | gigabytes    | 1000  |
+  | floating-ips | 50    |
+  | networks     | 100   |
+  +--------------+-------+
+
+  EXPLANATION:
+  - instances    : Max VMs in project (10)
+  - cores        : Max vCPUs across all VMs (20)
+  - ram          : Max RAM in MB (51200 = 50GB)
+  - gigabytes    : Max volume storage in GB (1000)
+  - floating-ips : Max floating IPs (50)
+  - -1           : Means unlimited for that resource
+
+  Increase quota for a project:
+  $ openstack quota set \
+    --instances 20 \
+    --cores 40 \
+    --ram 102400 \
+    demo
+
+  Verify change:
+  $ openstack quota show demo | grep -E "instances|cores|ram"
+  | cores     | 40     |
+  | instances | 20     |
+  | ram       | 102400 |
+
+  EXPLANATION:
+  - Quota exceeded error example:
+    "Quota exceeded for ram: Requested 999999,
+     but already used 0 of 51200 ram (HTTP 403)"
+  - HTTP 403 = Forbidden due to quota limit
+  - Fix: Increase quota or use smaller flavor
+
+
+6. CHECK RABBITMQ STATUS
+-------------------------
+Purpose: Verify message queue health (critical for all services)
+
+  $ sudo systemctl status rabbitmq-server
+
+  Output:
+  rabbitmq-server.service - RabbitMQ Messaging Server
+  Active: active (running) since Mon 2026-05-18 05:15:25 UTC
+  Main PID: 11788 (beam.smp)
+  Memory: 93.0M
+
+EXPLANATION:
+  - beam.smp   : Erlang VM process running RabbitMQ
+  - Memory: 93M: Normal memory usage for RabbitMQ
+  - enabled    : Will auto-start on reboot
+  - RabbitMQ is the message bus for ALL OpenStack services
+  - If RabbitMQ dies: entire cloud stops working
+  - All Nova, Neutron, Cinder operations go through RabbitMQ
+
+
+7. CHECK MYSQL STATUS AND DATABASES
+------------------------------------
+Purpose: Verify database health and OpenStack DB presence
+
+  $ sudo systemctl status mysql
+
+  Output:
+  mysql.service - MySQL Community Server
+  Active: active (running) since Mon 2026-05-18 04:04:46 UTC
+  Status: "Server is operational"
+  Memory: 745.5M
+
+  $ mysql -u root -psecret -e "show databases;"
+
+  Output:
+  +--------------------+
+  | Database           |
+  +--------------------+
+  | cinder             |
+  | glance             |
+  | keystone           |
+  | neutron            |
+  | nova_api           |
+  | nova_cell0         |
+  | nova_cell1         |
+  | placement          |
+  +--------------------+
+
+EXPLANATION:
+  - keystone    : Users, projects, roles, tokens, endpoints
+  - nova_api    : VM metadata, flavors, keypairs, aggregates
+  - nova_cell1  : Actual VM instance data
+  - nova_cell0  : VMs that failed to schedule (unscheduled)
+  - neutron     : Networks, subnets, routers, ports, SGs
+  - cinder      : Volumes, snapshots, backups, volume types
+  - glance      : Image metadata (actual images on disk/swift)
+  - placement   : Resource inventory and allocation tracking
+
+================================================================
+COMMON TROUBLESHOOTING SCENARIOS
+================================================================
+
+SCENARIO 1: VM stuck in BUILD state
+  Cause: Image unavailable, no hypervisor capacity, network issue
+  Steps:
+  1. $ openstack server show <vm> | grep -E "status|fault"
+  2. $ sudo journalctl -u devstack@n-cpu.service | grep ERROR
+  3. $ sudo journalctl -u devstack@n-sch.service | grep ERROR
+  4. $ openstack hypervisor show myvm  (check capacity)
+  5. $ openstack image show <image-id>  (check image status)
+
+SCENARIO 2: VM in ERROR state
+  Cause: Image corrupt, hypervisor failure, network setup failed
+  Steps:
+  1. $ openstack server show <vm>  (check fault message)
+  2. $ sudo journalctl -u devstack@n-cpu.service | grep ERROR
+  3. Reset state: $ openstack server set --state active <vm>
+  4. Hard reboot: $ openstack server reboot --hard <vm>
+  5. If unfixable: $ openstack server delete <vm>
+
+SCENARIO 3: All API calls timing out
+  Cause: RabbitMQ or Keystone down
+  Steps:
+  1. $ sudo systemctl status rabbitmq-server
+  2. $ sudo systemctl status devstack@keystone.service
+  3. $ curl http://172.20.128.18/identity/  (test Keystone)
+  4. $ sudo systemctl restart rabbitmq-server
+
+SCENARIO 4: VM has no network/IP
+  Cause: DHCP failure, security group blocking, neutron issue
+  Steps:
+  1. $ openstack port list --server <vm-id>
+  2. $ openstack security group rule list <sg-id>
+  3. $ sudo journalctl -u devstack@q-svc.service | grep ERROR
+  4. Check floating IP: $ openstack floating ip list
+
+SCENARIO 5: Volume stuck in creating state
+  Cause: Cinder backend issue, LVM problem
+  Steps:
+  1. $ sudo journalctl -u devstack@c-vol.service | grep ERROR
+  2. $ sudo systemctl status devstack@c-vol.service
+  3. $ sudo pvs && sudo vgs && sudo lvs  (check LVM)
+
+================================================================
+LOG FILE LOCATIONS
+================================================================
+
+All DevStack logs are in: /opt/stack/logs/
+
+  Nova API     : /opt/stack/logs/n-api.log
+  Nova Compute : /opt/stack/logs/n-cpu.log
+  Neutron      : /opt/stack/logs/q-svc.log
+  Glance       : /opt/stack/logs/g-api.log
+  Cinder API   : /opt/stack/logs/c-api.log
+  Keystone     : via journalctl devstack@keystone
+
+Or use journalctl:
+  $ sudo journalctl -u devstack@<service> --no-pager | tail -50
+  $ sudo journalctl -u devstack@<service> --no-pager | grep ERROR
+
+================================================================
+KEY QUESTIONS - OPERATIONS
+================================================================
+
+Q: How do you check if all OpenStack services are running?
+A: sudo systemctl list-units | grep devstack
+   Look for any services not in 'active running' state.
+   Also check: openstack service list (Keystone endpoints)
+   And: openstack compute service list (Nova services)
+
+Q: What is RabbitMQ and why is it critical?
+A: RabbitMQ is the message broker (AMQP) used by OpenStack.
+   All services communicate asynchronously through it.
+   Nova-api sends VM creation request to queue, nova-scheduler
+   picks it up, sends to nova-compute etc. If RabbitMQ dies,
+   no new operations can be performed across the entire cloud.
+
+Q: How do you increase quota for a project?
+A: openstack quota set --instances 20 --cores 40 demo
+   Quotas control: instances, cores, RAM, volumes,
+   gigabytes, floating-ips, networks, ports etc.
+
+Q: Where are OpenStack log files?
+A: In DevStack: /opt/stack/logs/ or via journalctl
+   In production: /var/log/nova/, /var/log/neutron/,
+   /var/log/cinder/, /var/log/keystone/ etc.
+
+Q: How do you find why a VM went to ERROR state?
+A: openstack server show <vm> (check fault field)
+   Then check nova-compute logs for that instance UUID.
+   grep the instance ID in /var/log/nova/nova-compute.log
+
+================================================================
+END
+================================================================
