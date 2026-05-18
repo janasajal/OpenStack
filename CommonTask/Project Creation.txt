@@ -1,0 +1,360 @@
+================================================================================
+ LAB SCENARIO 02 — Tenant / Project Creation
+ Topic   : New Business Unit Onboarding with Project, Users, Quotas,
+           Roles, and Isolated Networking
+
+================================================================================
+
+OBJECTIVE
+---------
+A dedicated OpenStack project was required to be configured for a new business
+unit. The setup included project creation, user provisioning, role assignments,
+quota definition, isolated networking with router connectivity, and default
+security group baseline rules.
+
+--------------------------------------------------------------------------------
+STEP 1 — Project Creation
+--------------------------------------------------------------------------------
+
+The project was created under the Default domain with a descriptive label:
+
+  $ openstack project create \
+      --domain Default \
+      --description "Business Unit - Finance Team" \
+      --enable \
+      finance-bu-project
+
+  +-------------+--------------------------------------+
+  | Field       | Value                                |
+  +-------------+--------------------------------------+
+  | id          | proj-1234-abcd-5678-efgh-000000000001|
+  | name        | finance-bu-project                   |
+  | domain_id   | default                              |
+  | description | Business Unit - Finance Team         |
+  | enabled     | True                                 |
+  +-------------+--------------------------------------+
+
+The project listing was verified:
+
+  $ openstack project list | grep finance
+
+  | proj-1234-abcd-5678-efgh-000000000001 | finance-bu-project |
+
+--------------------------------------------------------------------------------
+STEP 2 — User Creation and Role Assignment
+--------------------------------------------------------------------------------
+
+A project-level admin user was created for the business unit lead:
+
+  $ openstack user create \
+      --domain Default \
+      --project finance-bu-project \
+      --password 'SecureP@ss123!' \
+      --email finance-admin@company.com \
+      --enable \
+      finance-admin
+
+  +---------------------+--------------------------------------+
+  | Field               | Value                                |
+  +---------------------+--------------------------------------+
+  | id                  | usr-0001-abcd-1234-efgh-000000000001 |
+  | name                | finance-admin                        |
+  | email               | finance-admin@company.com            |
+  | enabled             | True                                 |
+  +---------------------+--------------------------------------+
+
+A regular member user was created for day-to-day operations:
+
+  $ openstack user create \
+      --domain Default \
+      --project finance-bu-project \
+      --password 'SecureP@ss456!' \
+      --email finance-user01@company.com \
+      --enable \
+      finance-user01
+
+The admin role was assigned to the BU lead — scoped to this project only:
+
+  $ openstack role add \
+      --project finance-bu-project \
+      --user finance-admin \
+      admin
+
+The member role was assigned to the regular user:
+
+  $ openstack role add \
+      --project finance-bu-project \
+      --user finance-user01 \
+      member
+
+Role assignments were verified:
+
+  $ openstack role assignment list \
+      --project finance-bu-project \
+      --names
+
+  +--------+-------------------------------+-------+--------------------+
+  | Role   | User                          | Group | Project            |
+  +--------+-------------------------------+-------+--------------------+
+  | admin  | finance-admin@Default         |       | finance-bu-project |
+  | member | finance-user01@Default        |       | finance-bu-project |
+  +--------+-------------------------------+-------+--------------------+
+
+--------------------------------------------------------------------------------
+STEP 3 — Quota Configuration
+--------------------------------------------------------------------------------
+
+Compute quotas were defined to restrict vCPU, RAM, and instance consumption:
+
+  $ openstack quota set \
+      --cores 40 \
+      --ram 81920 \
+      --instances 20 \
+      --key-pairs 10 \
+      finance-bu-project
+
+Storage quotas were applied for volume and snapshot limits:
+
+  $ openstack quota set \
+      --volumes 20 \
+      --snapshots 10 \
+      --gigabytes 2000 \
+      finance-bu-project
+
+Network quotas were set to control network resource consumption:
+
+  $ openstack quota set \
+      --networks 5 \
+      --subnets 5 \
+      --routers 2 \
+      --floating-ips 10 \
+      --security-groups 10 \
+      --security-group-rules 50 \
+      --ports 100 \
+      finance-bu-project
+
+All quotas were confirmed:
+
+  $ openstack quota show finance-bu-project
+
+  +----------------------+-------+
+  | Resource             | Limit |
+  +----------------------+-------+
+  | cores                |    40 |
+  | ram                  | 81920 |
+  | instances            |    20 |
+  | key-pairs            |    10 |
+  | volumes              |    20 |
+  | snapshots            |    10 |
+  | gigabytes            |  2000 |
+  | networks             |     5 |
+  | subnets              |     5 |
+  | routers              |     2 |
+  | floating-ips         |    10 |
+  | security-groups      |    10 |
+  | security-group-rules |    50 |
+  | ports                |   100 |
+  +----------------------+-------+
+
+--------------------------------------------------------------------------------
+STEP 4 — Isolated Network, Subnet, and Router Configuration
+--------------------------------------------------------------------------------
+
+Project-scoped credentials were sourced before network creation:
+
+  $ export OS_PROJECT_NAME=finance-bu-project
+
+A private internal network was created — isolated from other tenants
+using VXLAN segmentation:
+
+  $ openstack network create \
+      --project finance-bu-project \
+      --internal \
+      finance-internal-net
+
+  +------------------+--------------------------------------+
+  | Field            | Value                                |
+  +------------------+--------------------------------------+
+  | id               | net-abcd-1234-5678-efgh-000000000001 |
+  | name             | finance-internal-net                 |
+  | status           | ACTIVE                               |
+  | shared           | False                                |
+  | admin_state_up   | UP                                   |
+  +------------------+--------------------------------------+
+
+A subnet was created with a dedicated CIDR, gateway, DNS, and allocation pool:
+
+  $ openstack subnet create \
+      --project finance-bu-project \
+      --network finance-internal-net \
+      --subnet-range 192.168.50.0/24 \
+      --gateway 192.168.50.1 \
+      --dns-nameserver 8.8.8.8 \
+      --dns-nameserver 8.8.4.4 \
+      --allocation-pool start=192.168.50.10,end=192.168.50.200 \
+      finance-subnet-01
+
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | id                | sub-abcd-1234-5678-efgh-000000000001 |
+  | name              | finance-subnet-01                    |
+  | cidr              | 192.168.50.0/24                      |
+  | gateway_ip        | 192.168.50.1                         |
+  | allocation_pools  | 192.168.50.10-192.168.50.200         |
+  | dns_nameservers   | 8.8.4.4, 8.8.8.8                     |
+  +-------------------+--------------------------------------+
+
+A router was created to connect the tenant network to the external network:
+
+  $ openstack router create \
+      --project finance-bu-project \
+      finance-router-01
+
+  +--------+--------------------------------------+
+  | Field  | Value                                |
+  +--------+--------------------------------------+
+  | id     | rtr-abcd-1234-5678-efgh-000000000001 |
+  | name   | finance-router-01                    |
+  | status | ACTIVE                               |
+  +--------+--------------------------------------+
+
+The external gateway was set on the router:
+
+  $ openstack router set \
+      --external-gateway external-net \
+      finance-router-01
+
+The internal subnet interface was added to the router:
+
+  $ openstack router add subnet \
+      finance-router-01 \
+      finance-subnet-01
+
+Router ports were verified:
+
+  $ openstack router show finance-router-01 | grep -A5 interfaces
+
+  | interfaces_info | [{"subnet_id": "sub-abcd-...", "ip_address": "192.168.50.1",  |
+  |                 |   "port_id": "port-abcd-..."},                                |
+  |                 |  {"subnet_id": "ext-sub-...", "ip_address": "10.50.0.15",     |
+  |                 |   "port_id": "port-ext-..."}]                                 |
+
+--------------------------------------------------------------------------------
+STEP 5 — Default Security Group Baseline Rule
+--------------------------------------------------------------------------------
+
+The default security group was identified for the project:
+
+  $ openstack security group list --project finance-bu-project
+
+  +--------------------------------------+---------+----------------------------------+
+  | ID                                   | Name    | Description                      |
+  +--------------------------------------+---------+----------------------------------+
+  | sg-abcd-1234-5678-efgh-000000000001  | default | Default security group           |
+  +--------------------------------------+---------+----------------------------------+
+
+An SSH ingress rule was added, restricted to the corporate IP range only:
+
+  $ openstack security group rule create \
+      --protocol tcp \
+      --dst-port 22 \
+      --remote-ip 10.0.0.0/8 \
+      --ingress \
+      sg-abcd-1234-5678-efgh-000000000001
+
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | id                | rule-abcd-0001-0001-0001-000000000001|
+  | protocol          | tcp                                  |
+  | port_range_min    | 22                                   |
+  | port_range_max    | 22                                   |
+  | remote_ip_prefix  | 10.0.0.0/8                           |
+  | direction         | ingress                              |
+  +-------------------+--------------------------------------+
+
+Security group rules were reviewed:
+
+  $ openstack security group rule list default \
+      --project finance-bu-project
+
+  +--------------------+----------+------------+-------------------+---------+
+  | ID                 | Protocol | Port Range | Remote IP         | Dir     |
+  +--------------------+----------+------------+-------------------+---------+
+  | rule-abcd-0001-... | tcp      | 22:22      | 10.0.0.0/8        | ingress |
+  | rule-abcd-0002-... | None     | None       | 0.0.0.0/0         | egress  |
+  +--------------------+----------+------------+-------------------+---------+
+
+--------------------------------------------------------------------------------
+STEP 6 — Final Validation
+--------------------------------------------------------------------------------
+
+The project was confirmed active:
+
+  $ openstack project show finance-bu-project | grep -E "id|name|enabled"
+
+  | id      | proj-1234-abcd-5678-efgh-000000000001 |
+  | name    | finance-bu-project                    |
+  | enabled | True                                  |
+
+A scoped token was issued for the finance-admin user to confirm authentication:
+
+  $ openstack token issue \
+      --os-username finance-admin \
+      --os-password 'SecureP@ss123!' \
+      --os-project-name finance-bu-project \
+      --os-auth-url http://keystone.company.local:5000/v3
+
+  +------------+----------------------------------+
+  | Field      | Value                            |
+  +------------+----------------------------------+
+  | id         | token-abcd1234efgh5678...        |
+  | project_id | proj-1234-abcd-5678-efgh-...     |
+  | user_id    | usr-0001-abcd-1234-efgh-...      |
+  | expires    | 2026-05-19T06:30:00+0000         |
+  +------------+----------------------------------+
+
+Network topology was verified:
+
+  $ openstack network list --project finance-bu-project
+  $ openstack subnet list  --project finance-bu-project
+  $ openstack router list  --project finance-bu-project
+
+  | finance-internal-net | ACTIVE          |
+  | finance-subnet-01    | 192.168.50.0/24 |
+  | finance-router-01    | ACTIVE          |
+
+Quota usage was confirmed at zero immediately post-creation:
+
+  $ openstack quota show --usage finance-bu-project
+
+  +----------+-------+------+----------+
+  | Resource | Limit | Used | Reserved |
+  +----------+-------+------+----------+
+  | cores    |    40 |    0 |        0 |
+  | ram      | 81920 |    0 |        0 |
+  | instances|    20 |    0 |        0 |
+  | volumes  |    20 |    0 |        0 |
+  | networks |     5 |    1 |        0 |
+  +----------+-------+------+----------+
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Project finance-bu-project was created and enabled
+  - Users finance-admin (admin role) and finance-user01 (member role) created
+  - Compute quota: 40 vCPU / 80GB RAM / 20 instances
+  - Storage quota: 20 volumes / 2TB storage
+  - Network quota: 5 networks / 2 routers / 10 floating IPs
+  - Isolated network 192.168.50.0/24 created with DHCP and DNS
+  - Router connected to external-net with internal subnet interface
+  - Default SG baseline SSH rule restricted to 10.0.0.0/8
+  - User authentication via scoped token confirmed
+
+================================================================================
+END OF LAB — SCENARIO 02
+================================================================================
