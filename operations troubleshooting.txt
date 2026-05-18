@@ -13,8 +13,7 @@ Day 5 covers real-world admin operations:
   - Common troubleshooting scenarios
   - RabbitMQ and MySQL health checks
 
-This is the most important day for interviews. Interviewers
-always ask troubleshooting questions.
+
 
 ================================================================
 LAB SETUP AFTER REBOOT
