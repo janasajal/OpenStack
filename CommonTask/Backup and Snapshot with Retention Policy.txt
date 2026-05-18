@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 07 — Backup and Snapshot with Retention Policy
+ Backup and Snapshot with Retention Policy
  Topic   : VM Snapshot, Cinder Volume Backup, Automated Retention,
            and Disaster Recovery Restore Validation
 ================================================================================
