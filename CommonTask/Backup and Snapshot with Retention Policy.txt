@@ -1,0 +1,407 @@
+================================================================================
+ LAB SCENARIO 07 — Backup and Snapshot with Retention Policy
+ Topic   : VM Snapshot, Cinder Volume Backup, Automated Retention,
+           and Disaster Recovery Restore Validation
+================================================================================
+
+OBJECTIVE
+---------
+A comprehensive backup and snapshot strategy was required to be implemented
+for production VMs. Nova snapshots were configured for instance-level recovery,
+Cinder volume snapshots for fast point-in-time recovery, and Cinder volume
+backups for true disaster recovery to a separate backend. An automated
+retention policy script was deployed via cron, and a full restore test was
+performed to validate recovery procedures.
+
+--------------------------------------------------------------------------------
+BACKUP STRATEGY REFERENCE
+--------------------------------------------------------------------------------
+
+  Nova Snapshot    -> Instance-level recovery. Stored as Glance image.
+                     Suitable for full VM rebuild.
+
+  Volume Snapshot  -> Point-in-time capture at Cinder backend layer.
+                     Fast recovery within same environment.
+                     Lost if backend storage fails.
+
+  Volume Backup    -> Written to separate backup backend (Swift/NFS).
+                     True DR protection independent of primary backend.
+                     Supports incremental backup.
+
+--------------------------------------------------------------------------------
+STEP 1 — Current State Assessment
+--------------------------------------------------------------------------------
+
+All production VMs and their attached volumes were reviewed:
+
+  $ openstack server list --long
+
+  +--------------------------------------+-------------+--------+---------+
+  | ID                                   | Name        | Status | Volumes |
+  +--------------------------------------+-------------+--------+---------+
+  | vm-abcd-0001-1234-5678-000000000001  | prod-app-01 | ACTIVE | 2       |
+  | vm-abcd-0002-1234-5678-000000000002  | prod-db-01  | ACTIVE | 3       |
+  +--------------------------------------+-------------+--------+---------+
+
+Volumes attached to prod-app-01 were listed:
+
+  $ openstack volume list \
+      --server prod-app-01 \
+      --long
+
+  +--------------------------------------+---------------------+--------+------+-------------+
+  | ID                                   | Name                | Status | Size | Attached to |
+  +--------------------------------------+---------------------+--------+------+-------------+
+  | vol-abcd-0001-1234-5678-000000000001 | prod-app-01-bootvol | in-use |   40 | /dev/vda    |
+  | vol-abcd-0002-1234-5678-000000000002 | prod-app-01-datavol | in-use |  200 | /dev/vdb    |
+  +--------------------------------------+---------------------+--------+------+-------------+
+
+--------------------------------------------------------------------------------
+STEP 2 — Nova Snapshot (Instance-Level)
+--------------------------------------------------------------------------------
+
+The filesystem was frozen inside the VM before snapshotting to ensure
+consistency:
+
+  $ ssh -i ~/.ssh/prod-keypair.pem cloud-user@prod-app-01 \
+      "sudo fsfreeze --freeze /data"
+
+A Nova snapshot was created using the --wait flag:
+
+  $ openstack server image create \
+      --name "prod-app-01-snap-20260518-0800" \
+      --wait \
+      prod-app-01
+
+  +------------------+----------------------------------------------+
+  | Field            | Value                                        |
+  +------------------+----------------------------------------------+
+  | id               | img-snap-abcd-1234-5678-efgh-000000000001    |
+  | name             | prod-app-01-snap-20260518-0800               |
+  | status           | active                                       |
+  | disk_format      | qcow2                                        |
+  | min_disk         | 40                                           |
+  | min_ram          | 2048                                         |
+  +------------------+----------------------------------------------+
+
+The snapshot was tagged for retention management:
+
+  $ openstack image set \
+      --tag "nova-snapshot" \
+      --tag "prod-app-01" \
+      --tag "daily" \
+      --tag "20260518" \
+      "prod-app-01-snap-20260518-0800"
+
+The filesystem was unfrozen after snapshot completion:
+
+  $ ssh -i ~/.ssh/prod-keypair.pem cloud-user@prod-app-01 \
+      "sudo fsfreeze --unfreeze /data"
+
+--------------------------------------------------------------------------------
+STEP 3 — Cinder Volume Snapshots
+--------------------------------------------------------------------------------
+
+Both volumes were snapshotted using the --force flag (required for in-use
+volumes):
+
+Boot volume snapshot:
+
+  $ openstack volume snapshot create \
+      --volume prod-app-01-bootvol \
+      --description "Daily boot volume snap $(date +%Y%m%d)" \
+      --force \
+      prod-app-01-bootvol-snap-20260518
+
+  +-------------+----------------------------------------------+
+  | Field       | Value                                        |
+  +-------------+----------------------------------------------+
+  | id          | snap-abcd-0001-1234-5678-000000000001        |
+  | name        | prod-app-01-bootvol-snap-20260518            |
+  | volume_id   | vol-abcd-0001-1234-5678-000000000001         |
+  | size        | 40                                           |
+  | status      | creating                                     |
+  +-------------+----------------------------------------------+
+
+Data volume snapshot:
+
+  $ openstack volume snapshot create \
+      --volume prod-app-01-datavol \
+      --description "Daily data volume snap $(date +%Y%m%d)" \
+      --force \
+      prod-app-01-datavol-snap-20260518
+
+  +-------------+----------------------------------------------+
+  | Field       | Value                                        |
+  +-------------+----------------------------------------------+
+  | id          | snap-abcd-0002-1234-5678-000000000002        |
+  | name        | prod-app-01-datavol-snap-20260518            |
+  | volume_id   | vol-abcd-0002-1234-5678-000000000002         |
+  | size        | 200                                          |
+  | status      | creating                                     |
+  +-------------+----------------------------------------------+
+
+Both snapshots were confirmed available:
+
+  $ openstack volume snapshot list | grep prod-app-01
+
+  +--------------------------------------+----------------------------------+------+-----------+
+  | ID                                   | Name                             | Size | Status    |
+  +--------------------------------------+----------------------------------+------+-----------+
+  | snap-abcd-0001-...                   | prod-app-01-bootvol-snap-20260518|   40 | available |
+  | snap-abcd-0002-...                   | prod-app-01-datavol-snap-20260518|  200 | available |
+  +--------------------------------------+----------------------------------+------+-----------+
+
+--------------------------------------------------------------------------------
+STEP 4 — Cinder Volume Backups (DR Tier)
+--------------------------------------------------------------------------------
+
+A full backup of the boot volume was written to the Swift backup backend:
+
+  $ openstack volume backup create \
+      --name "prod-app-01-bootvol-backup-20260518" \
+      --description "Full DR backup boot volume" \
+      --force \
+      prod-app-01-bootvol
+
+  +----------------+----------------------------------------------+
+  | Field          | Value                                        |
+  +----------------+----------------------------------------------+
+  | id             | bkp-abcd-0001-1234-5678-000000000001         |
+  | name           | prod-app-01-bootvol-backup-20260518          |
+  | size           | 40                                           |
+  | status         | creating                                     |
+  | is_incremental | False                                        |
+  | container      | volumes_backup                               |
+  +----------------+----------------------------------------------+
+
+An incremental backup of the data volume was created (only changed blocks
+since the last backup):
+
+  $ openstack volume backup create \
+      --name "prod-app-01-datavol-backup-20260518" \
+      --description "Incremental DR backup data volume" \
+      --incremental \
+      --force \
+      prod-app-01-datavol
+
+  +----------------+----------------------------------------------+
+  | Field          | Value                                        |
+  +----------------+----------------------------------------------+
+  | id             | bkp-abcd-0002-1234-5678-000000000002         |
+  | name           | prod-app-01-datavol-backup-20260518          |
+  | size           | 200                                          |
+  | status         | creating                                     |
+  | is_incremental | True                                         |
+  +----------------+----------------------------------------------+
+
+Both backups were confirmed available:
+
+  $ openstack volume backup list | grep prod-app-01
+
+  +--------------------------------------+-------------------------------------+------+-----------+
+  | ID                                   | Name                                | Size | Status    |
+  +--------------------------------------+-------------------------------------+------+-----------+
+  | bkp-abcd-0001-...                    | prod-app-01-bootvol-backup-20260518 |   40 | available |
+  | bkp-abcd-0002-...                    | prod-app-01-datavol-backup-20260518 |  200 | available |
+  +--------------------------------------+-------------------------------------+------+-----------+
+
+--------------------------------------------------------------------------------
+STEP 5 — Automated Backup and Retention Script
+--------------------------------------------------------------------------------
+
+A retention-aware backup script was deployed for automated daily execution:
+
+  $ cat /opt/openstack/scripts/backup-retention.sh
+
+  #!/bin/bash
+  # OpenStack VM Backup & Retention Policy Script
+  # Schedule: Daily 02:00 AM via cron
+
+  set -euo pipefail
+  source /etc/openstack/admin-openrc.sh
+
+  VM_NAME="prod-app-01"
+  RETENTION_DAYS=7
+  BACKUP_RETENTION_DAYS=30
+  DATE=$(date +%Y%m%d-%H%M)
+  LOG="/var/log/openstack/backup-${VM_NAME}-${DATE}.log"
+  ALERT_EMAIL="infra-team@company.com"
+
+  log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+  # Nova Snapshot
+  log "Starting Nova snapshot for ${VM_NAME}"
+  openstack server image create \
+    --name "${VM_NAME}-snap-${DATE}" --wait "${VM_NAME}" >> "$LOG" 2>&1
+
+  # Volume Backups
+  for VOL in $(openstack volume list --server "${VM_NAME}" \
+    -f value -c Name); do
+    openstack volume backup create \
+      --name "${VOL}-backup-${DATE}" \
+      --incremental --force "${VOL}" >> "$LOG" 2>&1
+    log "Volume backup submitted: ${VOL}-backup-${DATE}"
+  done
+
+  # Retention - Delete old Nova snapshots
+  CUTOFF=$(date -d "-${RETENTION_DAYS} days" +%Y%m%d)
+  openstack image list --tag "${VM_NAME}" --tag "nova-snapshot" \
+    -f value -c Name | while read SNAP_NAME; do
+    SNAP_DATE=$(echo "$SNAP_NAME" | grep -oP '\d{8}')
+    if [[ "$SNAP_DATE" < "$CUTOFF" ]]; then
+      openstack image delete "${SNAP_NAME}"
+      log "Deleted old snapshot: ${SNAP_NAME}"
+    fi
+  done
+
+  # Retention - Delete old volume backups
+  BACKUP_CUTOFF=$(date -d "-${BACKUP_RETENTION_DAYS} days" +%Y%m%d)
+  openstack volume backup list -f value -c Name \
+    | grep "${VM_NAME}" | while read BKP_NAME; do
+    BKP_DATE=$(echo "$BKP_NAME" | grep -oP '\d{8}')
+    if [[ "$BKP_DATE" < "$BACKUP_CUTOFF" ]]; then
+      openstack volume backup delete "${BKP_NAME}"
+      log "Deleted old backup: ${BKP_NAME}"
+    fi
+  done
+
+  log "Backup and retention cycle complete for ${VM_NAME}"
+
+The script was made executable and scheduled via cron:
+
+  $ chmod +x /opt/openstack/scripts/backup-retention.sh
+
+  $ crontab -e
+  0 2 * * * /opt/openstack/scripts/backup-retention.sh \
+    >> /var/log/openstack/backup-cron.log 2>&1
+
+  $ crontab -l | grep backup
+  0 2 * * * /opt/openstack/scripts/backup-retention.sh
+
+--------------------------------------------------------------------------------
+STEP 6 — Restore Test (DR Validation)
+--------------------------------------------------------------------------------
+
+A restore test was performed in a non-production project to validate recovery.
+
+VM was booted from the Nova snapshot:
+
+  $ openstack server create \
+      --flavor m1.medium \
+      --image "prod-app-01-snap-20260518-0800" \
+      --network tenant-internal-net \
+      --key-name prod-keypair \
+      --wait \
+      prod-app-01-restore-test
+
+  +-------------+------------------------------------------+
+  | Field       | Value                                    |
+  +-------------+------------------------------------------+
+  | name        | prod-app-01-restore-test                 |
+  | status      | ACTIVE                                   |
+  | image       | prod-app-01-snap-20260518-0800           |
+  | networks    | tenant-internal-net=192.168.100.50       |
+  +-------------+------------------------------------------+
+
+The data volume backup was restored to a new volume:
+
+  $ openstack volume backup restore \
+      prod-app-01-datavol-backup-20260518 \
+      prod-app-01-datavol-restored
+
+  +-------------+----------------------------------------------+
+  | Field       | Value                                        |
+  +-------------+----------------------------------------------+
+  | backup_id   | bkp-abcd-0002-1234-5678-000000000002         |
+  | volume_id   | vol-restored-abcd-1234-5678-000000000001     |
+  | volume_name | prod-app-01-datavol-restored                 |
+  +-------------+----------------------------------------------+
+
+The restored volume was attached to the test VM:
+
+  $ openstack server add volume \
+      prod-app-01-restore-test \
+      prod-app-01-datavol-restored \
+      --device /dev/vdb
+
+Data integrity was confirmed inside the restored VM:
+
+  $ ssh -i ~/.ssh/prod-keypair.pem cloud-user@192.168.100.50
+
+  [cloud-user@prod-app-01-restore-test ~]$ lsblk
+
+  NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+  vda    252:0    0   40G  0 disk
+  └─vda1 252:1    0   40G  0 part /
+  vdb    252:16   0  200G  0 disk   <- restored data volume attached
+
+  [cloud-user@prod-app-01-restore-test ~]$ sudo mount /dev/vdb1 /mnt/restore
+
+  [cloud-user@prod-app-01-restore-test ~]$ ls /mnt/restore
+
+  app-data  db-dumps  configs  logs   <- data confirmed intact
+
+  [cloud-user@prod-app-01-restore-test ~]$ df -hT /mnt/restore
+
+  Filesystem   Type  Size  Used Avail Use% Mounted on
+  /dev/vdb1    xfs   200G   91G  109G  46% /mnt/restore
+
+Test resources were cleaned up after validation:
+
+  $ openstack server delete prod-app-01-restore-test --wait
+  $ openstack volume delete prod-app-01-datavol-restored
+
+--------------------------------------------------------------------------------
+STEP 7 — Backup Inventory Audit
+--------------------------------------------------------------------------------
+
+Nova snapshot inventory was reviewed:
+
+  $ openstack image list --tag "nova-snapshot" --long | grep prod
+
+  +--------------------------------------+-------------------------------+--------+
+  | ID                                   | Name                          | Status |
+  +--------------------------------------+-------------------------------+--------+
+  | img-snap-abcd-0001-...               | prod-app-01-snap-20260518-0800| active |
+  | img-snap-abcd-0002-...               | prod-app-01-snap-20260517-0800| active |
+  +--------------------------------------+-------------------------------+--------+
+
+Volume backup inventory was reviewed:
+
+  $ openstack volume backup list --all-projects | grep prod
+
+  +--------------------------------------+-------------------------------------+------+-----------+
+  | ID                                   | Name                                | Size | Status    |
+  +--------------------------------------+-------------------------------------+------+-----------+
+  | bkp-abcd-0001-...                    | prod-app-01-bootvol-backup-20260518 |   40 | available |
+  | bkp-abcd-0002-...                    | prod-app-01-datavol-backup-20260518 |  200 | available |
+  +--------------------------------------+-------------------------------------+------+-----------+
+
+Swift backup container usage was reviewed:
+
+  $ swift stat volumes_backup
+
+       Account: AUTH_abcd1234efgh5678
+     Container: volumes_backup
+       Objects: 47
+         Bytes: 1289748230144   <- approximately 1.2TB backup data stored
+
+--------------------------------------------------------------------------------
+OUTCOME
+--------------------------------------------------------------------------------
+
+The following was confirmed upon completion:
+
+  - Nova snapshot captured full instance disk state as Glance image
+  - Cinder volume snapshots created for boot and data volumes (--force)
+  - Cinder volume backups written to Swift backend (boot: full, data: incr)
+  - Automated retention script deployed via cron (7d snap / 30d backup)
+  - Restore test passed: VM booted from snapshot, data volume mounted
+  - All original data confirmed intact on restored volume
+  - Test resources cleaned up post-validation
+  - Backup inventory audited — no orphaned or expired backups remaining
+
+================================================================================
+END OF LAB — SCENARIO 07
+================================================================================
