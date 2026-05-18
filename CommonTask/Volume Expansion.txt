@@ -1,5 +1,5 @@
 ================================================================================
- LAB SCENARIO 03 — Volume Expansion (Online, Zero Downtime)
+ Volume Expansion (Online, Zero Downtime)
  Topic   : Cinder Volume Extension for a Running Production VM
            Including Partition and Filesystem Resize
 ================================================================================
@@ -258,5 +258,5 @@ The following was confirmed upon completion:
   - Pre-expansion snapshot retained as recovery baseline
 
 ================================================================================
-END OF LAB — SCENARIO 03
+END
 ================================================================================
